@@ -1,13 +1,46 @@
+# trae2api-web（TRAE SOLO → OpenAI 兼容 API 网关）
+# 使用 GitHub Container Registry 的固定版本镜像
+# 部署（1Panel 编排或命令行二选一）：
+#   docker compose pull
+#   docker compose up -d --wait
 services:
   tw2api:
-    build: .
+    image: ghcr.io/aibyhub/trae2api-web:1.0.0
     container_name: trae2api-web
     restart: unless-stopped
-    environment:
-      - TZ=Asia/Shanghai
-      - TW2A_API_KEY=${TW2A_API_KEY:?set TW2A_API_KEY in .env or shell}   # key 走 env，不落盘 git
+    mem_limit: 256m
+    init: true
+    stop_grace_period: 30s
+    networks:
+      - 1panel-network
+    # 1Panel / Nginx 从宿主机回源：宿主机 8083 → 容器 7864
     ports:
-      - "7864:7864"
+      - "127.0.0.1:8083:7864"
+    environment:
+      TZ: Asia/Shanghai
+      # API Key 只从环境变量读取（不落 config.json）。
+      # 1Panel 部署时在「环境变量」框填：TW2A_API_KEY=你的随机密钥（openssl rand -hex 32）
+      TW2A_API_KEY: ${TW2A_API_KEY:?set TW2A_API_KEY in 1Panel env box or .env}
+    # 镜像默认用户 app:app（10001:10001）
+    user: "10001:10001"
     volumes:
+      # OAuth 账号凭证，必须持久化
       - ./auths:/app/auths
+      # state.json 等运行状态，必须持久化
       - ./data:/app/data
+    healthcheck:
+      # /healthz 恒返回 200，纯进程存活检查（与账号数量无关）
+      test:
+        [
+          "CMD-SHELL",
+          "wget -qO- http://127.0.0.1:7864/healthz >/dev/null 2>&1 || exit 1"
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+networks:
+  1panel-network:
+    external: true
+    name: 1panel-network
