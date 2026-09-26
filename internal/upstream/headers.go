@@ -45,12 +45,16 @@ func SOLOHeaders(req *http.Request, a *auth.Auth, stream bool) {
 }
 
 // UgHeaders 设置签到/积分（api.trae.cn）所需头。
+// X-Device-Id 是 claim 的必需头（缺失 → 9004）；X-Machine-Id 与真实客户端成对发送。
 func UgHeaders(req *http.Request, a *auth.Auth) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", clientUA)
 	req.Header.Set("Authorization", "Cloud-IDE-JWT "+a.JWT()) // 读锁快照
 	req.Header.Set("X-User-Region", "CN")
+	if a.MachineID != "" {
+		req.Header.Set("X-Machine-Id", a.MachineID)
+	}
 	if a.DeviceID != "" {
 		req.Header.Set("X-Device-Id", a.DeviceID)
 	}
