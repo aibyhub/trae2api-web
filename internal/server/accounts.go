@@ -193,6 +193,19 @@ func (h *Handler) importFromCallback(req importRequest) (*auth.Auth, error) {
 	if a.AccessToken == "" {
 		return nil, errors.New("no access token after exchange")
 	}
+	// 补设备身份：签到 claim 必须带 X-Device-Id（缺失 → 上游 9004）。
+	// 粘贴导入无法得知原登录的设备对，生成新对随凭证落盘；
+	// 若上游校验设备绑定（9074），用面板「添加账号」重登即可重新注册。
+	if a.MachineID == "" {
+		if mid, rerr := randomHex(16); rerr == nil {
+			a.MachineID = mid
+		}
+	}
+	if a.DeviceID == "" {
+		if did, rerr := randomHex(16); rerr == nil {
+			a.DeviceID = did
+		}
+	}
 	return a, nil
 }
 
@@ -215,6 +228,17 @@ func (h *Handler) importFromJSON(req importRequest) (*auth.Auth, error) {
 	}
 	if a.ApiHost == "" {
 		a.ApiHost = "https://api.trae.com.cn"
+	}
+	// 补设备身份（同 importFromCallback：缺失 → 签到 claim 9004）
+	if a.MachineID == "" {
+		if mid, rerr := randomHex(16); rerr == nil {
+			a.MachineID = mid
+		}
+	}
+	if a.DeviceID == "" {
+		if did, rerr := randomHex(16); rerr == nil {
+			a.DeviceID = did
+		}
 	}
 	return a, nil
 }

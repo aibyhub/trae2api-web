@@ -319,10 +319,13 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 	return out, nil
 }
 
+// ugCheckinBody status/claim 的请求体（实测与官方客户端一致：{"req_source":1}）。
+var ugCheckinBody = []byte(`{"req_source":1}`)
+
 // CheckinStatus 查询签到状态。
 // ug 通道业务码随 HTTP 200 返回，需同时解析 code 与字段（兼容 data 嵌套形态）。
 func (c *Client) CheckinStatus(a *auth.Auth) (checkedIn bool, credits int64, enable bool, err error) {
-	req, err := http.NewRequest(http.MethodPost, c.ugBase()+EpCheckinStatus, bytes.NewReader([]byte("{}")))
+	req, err := http.NewRequest(http.MethodPost, c.ugBase()+EpCheckinStatus, bytes.NewReader(ugCheckinBody))
 	if err != nil {
 		return false, 0, false, err
 	}
@@ -357,10 +360,13 @@ func (c *Client) CheckinStatus(a *auth.Auth) (checkedIn bool, credits int64, ena
 }
 
 // CheckinClaim 执行签到。
-// ug 通道业务码随 HTTP 200 返回（实测 9074「当前使用人数太多」，见 RESEARCH §3/§5），
-// 只看 HTTP 状态码会把失败当成功——必须解析 body 的 code。
+// 两个实测坑（见 RESEARCH §3/§5 与公开复盘）：
+//   - 业务码随 HTTP 200 返回（如 9074），只看 HTTP 状态码会把失败当成功——必须解析 body 的 code
+//   - claim 必须带 X-Device-Id 头（缺失 → 9004「order parameters incorrect」；
+//     设备号未被账号注册 → 9074「人数太多」幌子文案）。设备对由登录流程生成并随 OAuth 注册，
+//     粘贴导入的账号需在导入时补生成（见 server.importFromCallback）。
 func (c *Client) CheckinClaim(a *auth.Auth) error {
-	req, err := http.NewRequest(http.MethodPost, c.ugBase()+EpCheckinClaim, bytes.NewReader([]byte("{}")))
+	req, err := http.NewRequest(http.MethodPost, c.ugBase()+EpCheckinClaim, bytes.NewReader(ugCheckinBody))
 	if err != nil {
 		return err
 	}
