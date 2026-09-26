@@ -103,7 +103,7 @@
     <input id="apikey" type="password" placeholder="TW2A_API_KEY（写操作必填，点「记忆」保存）" oninput="onKeyChange()">
     <button class="btn sm" onclick="saveKey()">保存</button>
     <span id="keystatus" class="saved" style="display:none">已记忆</span>
-    <span style="margin-left:auto;font-size:11px">列表/额度为只读；导入/删除/开关/登录需 Key</span>
+    <span style="margin-left:auto;font-size:11px">列表/额度为只读；导入/删除/开关/登录/签到/刷新需 Key</span>
   </div>
 
   <div class="tabs">
@@ -125,6 +125,15 @@
       <div class="imp-row">
         <button class="btn" onclick="importCred()">导入</button>
         <span id="impStatus" class="login-status" style="display:none"></span>
+      </div>
+    </div>
+
+    <div class="login-bar">
+      <h2>定时任务操作<small style="color:var(--dim);font-weight:400;margin-left:8px">每日自动：签到 9:00 · token 刷新 3:00（时区 Asia/Shanghai）</small></h2>
+      <div class="imp-row">
+        <button class="btn primary" id="checkinAllBtn" onclick="checkinAll()">立即签到（全部账号）</button>
+        <button class="btn" id="refreshAllBtn" onclick="refreshAllTokens()">立即刷新凭证</button>
+        <span id="opsStatus" class="login-status" style="display:none"></span>
       </div>
     </div>
 
@@ -221,6 +230,7 @@ function renderAccounts(accts){
       + '<td class="mono">'+esc(a.machine_id||'-')+' / '+esc(a.device_id||'-')+'</td>'
       + '<td><div class="row-actions">'
       + '<label class="toggle"><input type="checkbox" '+toggleChecked+' '+toggleDisabled+' onchange="toggleAcct(\''+esc(a.uid)+'\', this.checked)"><span class="slider"></span></label>'
+      + '<button class="btn sm" onclick="checkinAcct(\''+esc(a.uid)+'\')">签到</button>'
       + '<button class="btn sm" onclick="refreshAcct(\''+esc(a.uid)+'\')">刷新token</button>'
       + '<button class="btn sm" onclick="showJSON(\''+esc(a.uid)+'\')">JSON</button>'
       + '<button class="btn sm danger" onclick="deleteAcct(\''+esc(a.uid)+'\')">删除</button>'
@@ -262,6 +272,57 @@ async function showJSON(uid){
   document.getElementById('modalBg').classList.add('show');
 }
 function closeModal(){ document.getElementById('modalBg').classList.remove('show'); }
+
+/* ─── 定时任务手动触发 ─── */
+function opsStatusShow(cls, text){
+  const st = document.getElementById('opsStatus');
+  st.style.display=''; st.className='login-status'+(cls?' '+cls:''); st.textContent=text;
+}
+function opText(res){
+  const map = {claimed:'领取成功', already:'今日已签', checkin_off:'签到未开启', refreshed:'已刷新', skipped:'跳过', error:'失败'};
+  let t = map[res && res.status] || (res && res.status) || '未知';
+  if(res && res.error) t += '：' + res.error;
+  return t;
+}
+async function checkinAll(){
+  const btn = document.getElementById('checkinAllBtn'); btn.disabled = true;
+  opsStatusShow('', '签到中（逐号请求上游，请稍候）...');
+  try{
+    const r = await fetch('/admin/api/checkin_all', {method:'POST', headers: authHeader()});
+    const d = await r.json();
+    if(!r.ok){ opsStatusShow('err', '签到失败：'+apiErr(d)); return; }
+    if(!d.total){ opsStatusShow('', '没有可签到的账号（先添加账号）'); return; }
+    let line = '签到完成：领取 '+(d.claimed||0)+' · 已签 '+(d.already||0)+' · 失败 '+(d.failed||0);
+    if(d.checkin_off) line += ' · 未开启 '+d.checkin_off;
+    opsStatusShow(d.failed?'err':'ok', line);
+    loadAccounts();
+  }catch(e){ opsStatusShow('err', '签到失败：'+e.message); }
+  finally{ btn.disabled = false; }
+}
+async function refreshAllTokens(){
+  const btn = document.getElementById('refreshAllBtn'); btn.disabled = true;
+  opsStatusShow('', '刷新中...');
+  try{
+    const r = await fetch('/admin/api/refresh_all', {method:'POST', headers: authHeader()});
+    const d = await r.json();
+    if(!r.ok){ opsStatusShow('err', '刷新失败：'+apiErr(d)); return; }
+    opsStatusShow(d.failed?'err':'ok',
+      '刷新完成：已刷新 '+(d.refreshed||0)+' · 跳过 '+(d.skipped||0)+'（未到刷新窗口）· 失败 '+(d.failed||0));
+    loadAccounts();
+  }catch(e){ opsStatusShow('err', '刷新失败：'+e.message); }
+  finally{ btn.disabled = false; }
+}
+async function checkinAcct(uid){
+  opsStatusShow('', '签到中（'+esc(uid.slice(0,8))+'）...');
+  try{
+    const r = await fetch('/admin/api/accounts/'+encodeURIComponent(uid)+'/checkin', {method:'POST', headers: authHeader()});
+    const d = await r.json();
+    if(!r.ok){ opsStatusShow('err', '签到失败：'+apiErr(d)); return; }
+    const res = d.result || {};
+    opsStatusShow(res.status==='error'?'err':'ok', '签到结果（'+esc((res.uid||uid).slice(0,8))+'）：'+opText(res));
+    loadAccounts();
+  }catch(e){ opsStatusShow('err', '签到失败：'+e.message); }
+}
 
 /* ─── 导入 ─── */
 async function importCred(){

@@ -61,6 +61,7 @@ func main() {
 		ErrThreshold: cfg.Cooldown.ErrThresh,
 		ErrCooldown:  cfg.ErrCooldownDur,
 		DefaultModel: cfg.DefaultModel,
+		Sched:        sch, // /admin 手动签到/刷新按钮的执行体
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
