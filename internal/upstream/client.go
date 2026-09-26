@@ -320,6 +320,7 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 }
 
 // CheckinStatus 查询签到状态。
+// ug 通道业务码随 HTTP 200 返回，需同时解析 code 与字段（兼容 data 嵌套形态）。
 func (c *Client) CheckinStatus(a *auth.Auth) (checkedIn bool, credits int64, enable bool, err error) {
 	req, err := http.NewRequest(http.MethodPost, c.ugBase()+EpCheckinStatus, bytes.NewReader([]byte("{}")))
 	if err != nil {
@@ -331,25 +332,64 @@ func (c *Client) CheckinStatus(a *auth.Auth) (checkedIn bool, credits int64, ena
 		return false, 0, false, err
 	}
 	var resp struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+		Msg     string `json:"msg"`
 		CheckedIn bool  `json:"checked_in"`
 		Credits   int64 `json:"credits"`
 		Enable    bool  `json:"enable"`
+		Data      *struct {
+			CheckedIn bool  `json:"checked_in"`
+			Credits   int64 `json:"credits"`
+			Enable    bool  `json:"enable"`
+		} `json:"data"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
 		return false, 0, false, fmt.Errorf("checkin status parse: %w", err)
+	}
+	if resp.Code != 0 {
+		return false, 0, false, fmt.Errorf("checkin status: code=%d %s", resp.Code, ugMsg(resp.Message, resp.Msg))
+	}
+	if resp.Data != nil {
+		return resp.Data.CheckedIn, resp.Data.Credits, resp.Data.Enable, nil
 	}
 	return resp.CheckedIn, resp.Credits, resp.Enable, nil
 }
 
 // CheckinClaim 执行签到。
+// ug 通道业务码随 HTTP 200 返回（实测 9074「当前使用人数太多」，见 RESEARCH §3/§5），
+// 只看 HTTP 状态码会把失败当成功——必须解析 body 的 code。
 func (c *Client) CheckinClaim(a *auth.Auth) error {
 	req, err := http.NewRequest(http.MethodPost, c.ugBase()+EpCheckinClaim, bytes.NewReader([]byte("{}")))
 	if err != nil {
 		return err
 	}
 	UgHeaders(req, a)
-	_, err = c.doJSON(req)
-	return err
+	data, err := c.doJSON(req)
+	if err != nil {
+		return err
+	}
+	var resp struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+		Msg     string `json:"msg"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		// HTTP 200 但 body 非 JSON：无法判读，保持旧行为按成功处理
+		return nil
+	}
+	if resp.Code != 0 {
+		return fmt.Errorf("checkin claim: code=%d %s", resp.Code, ugMsg(resp.Message, resp.Msg))
+	}
+	return nil
+}
+
+// ugMsg 取 message/msg 中非空者（上游两种字段名都出现过）。
+func ugMsg(message, msg string) string {
+	if strings.TrimSpace(message) != "" {
+		return message
+	}
+	return msg
 }
 
 // UserEntUsage 聚合积分（ide_user_ent_usage 的 credits_limit 求和）。

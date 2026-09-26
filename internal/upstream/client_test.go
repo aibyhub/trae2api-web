@@ -57,6 +57,46 @@ func testClient(fn rtFunc) *Client {
 	}
 }
 
+// TestCheckinClaimBodyError ug 通道业务码随 HTTP 200 返回（实测 9074 人数过多）：
+// CheckinClaim 必须解析 body 判失败，不能只看 HTTP 状态码。
+func TestCheckinClaimBodyError(t *testing.T) {
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		if !strings.HasSuffix(r.URL.Path, EpCheckinClaim) {
+			return nil, errors.New("wrong path: " + r.URL.Path)
+		}
+		return jsonResp(200, `{"code":9074,"message":"当前使用人数太多，请稍后再试"}`), nil
+	})
+	a := &auth.Auth{AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999}
+	if err := c.CheckinClaim(a); err == nil {
+		t.Fatal("HTTP 200 + body code=9074 should be an error")
+	}
+}
+
+func TestCheckinClaimSuccess(t *testing.T) {
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		return jsonResp(200, `{"code":0,"message":"success"}`), nil
+	})
+	a := &auth.Auth{AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999}
+	if err := c.CheckinClaim(a); err != nil {
+		t.Fatalf("claim should succeed: %v", err)
+	}
+}
+
+// TestCheckinStatusDataNesting status 响应包在 data 里时也能读出。
+func TestCheckinStatusDataNesting(t *testing.T) {
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		return jsonResp(200, `{"code":0,"data":{"checked_in":true,"credits":200,"enable":true}}`), nil
+	})
+	a := &auth.Auth{AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999}
+	checkedIn, credits, enable, err := c.CheckinStatus(a)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if !checkedIn || credits != 200 || !enable {
+		t.Errorf("got %v %v %v", checkedIn, credits, enable)
+	}
+}
+
 func TestRefreshTokenExchange(t *testing.T) {
 	c := testClient(func(r *http.Request) (*http.Response, error) {
 		if !strings.HasSuffix(r.URL.Path, EpExchange) {
