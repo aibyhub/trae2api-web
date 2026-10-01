@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -344,7 +345,9 @@ func (h *Handler) adminRatesGet(w http.ResponseWriter, r *http.Request) {
 	infos := h.fetchDynamicModels()
 	out := make([]map[string]any, 0, len(infos))
 	for _, mi := range infos {
-		if mi.Custom || mi.Invisible {
+		// 自定义占位：is_custom_model 标记 + custom_model_ 前缀双保险
+		// （实测 CN 上游对 custom_model_* 的 is_custom_model 仍为 false）
+		if mi.Custom || mi.Invisible || strings.HasPrefix(mi.ID, "custom_model_") {
 			continue
 		}
 		out = append(out, map[string]any{
