@@ -9,6 +9,7 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"strings"
 
 	"trae2api-web/internal/auth"
+	"trae2api-web/internal/upstream"
 )
 
 // accountSummary 列表/预览对外结构（脱敏）。
@@ -194,10 +196,11 @@ func (h *Handler) importFromCallback(req importRequest) (*auth.Auth, error) {
 	if a.AccessToken == "" {
 		return nil, errors.New("no access token after exchange")
 	}
-	// 补设备身份：签到 claim 必须带 X-Device-Id（缺失 → 上游 9004）。
-	// 粘贴导入无法得知原登录的设备对，生成新对随凭证落盘；
-	// 随机设备对未在上游注册，claim 可能被 9074 拒——面板「添加账号」重登
-	// 或导入时以真实客户端设备号覆盖（x-device-id 为 16 位纯数字）。
+	// 补设备身份：签到 claim 必须带十进制 x-device-id（12~20 位数字）。
+	// hex32/UUID 会被上游 9074 拒（「当前参与用户太多」为误导文案，
+	// 见 upstream/deviceid.go）；缺失或非十进制一律重新生成，
+	// machine_id 保持 hex32 不动。每账号独立设备号——上游按
+	// 「每设备每日一次」跨账号记账，共用号会让第二个账号被 9095 挡。
 	genDev := false
 	if a.MachineID == "" {
 		if mid, rerr := randomHex(16); rerr == nil {
@@ -205,14 +208,14 @@ func (h *Handler) importFromCallback(req importRequest) (*auth.Auth, error) {
 			genDev = true
 		}
 	}
-	if a.DeviceID == "" {
-		if did, rerr := randomHex(16); rerr == nil {
+	if !upstream.IsDecimalDeviceID(a.DeviceID) {
+		if did, rerr := upstream.NewDeviceID(); rerr == nil {
 			a.DeviceID = did
 			genDev = true
 		}
 	}
 	if genDev {
-		log.Printf("import: uid=%s 设备对为随机生成（未在上游注册），签到 claim 可能被 9074 拒绝；建议面板重登或用真实设备号覆盖", a.UID)
+		log.Printf("import: uid=%s 已补齐设备身份（device 为本账号独立十进制号）", a.UID)
 	}
 	return a, nil
 }
@@ -228,6 +231,9 @@ func (h *Handler) importFromJSON(req importRequest) (*auth.Auth, error) {
 		a.MachineID = req.MachineID
 	}
 	if req.DeviceID != "" {
+		if !upstream.IsDecimalDeviceID(req.DeviceID) {
+			return nil, fmt.Errorf("deviceId 必须为 12~20 位十进制数字（hex32/UUID 会被上游 9074 拒绝）")
+		}
 		a.DeviceID = req.DeviceID
 	}
 	// 缺省 host/domain 补默认
@@ -237,7 +243,7 @@ func (h *Handler) importFromJSON(req importRequest) (*auth.Auth, error) {
 	if a.ApiHost == "" {
 		a.ApiHost = "https://api.trae.com.cn"
 	}
-	// 补设备身份（同 importFromCallback：缺失 → 签到 claim 9004）
+	// 补设备身份（同 importFromCallback：十进制号，每账号独立）
 	genDev := false
 	if a.MachineID == "" {
 		if mid, rerr := randomHex(16); rerr == nil {
@@ -245,14 +251,14 @@ func (h *Handler) importFromJSON(req importRequest) (*auth.Auth, error) {
 			genDev = true
 		}
 	}
-	if a.DeviceID == "" {
-		if did, rerr := randomHex(16); rerr == nil {
+	if !upstream.IsDecimalDeviceID(a.DeviceID) {
+		if did, rerr := upstream.NewDeviceID(); rerr == nil {
 			a.DeviceID = did
 			genDev = true
 		}
 	}
 	if genDev {
-		log.Printf("import: uid=%s 设备对为随机生成（未在上游注册），签到 claim 可能被 9074 拒绝；建议面板重登或用真实设备号覆盖", a.UID)
+		log.Printf("import: uid=%s 已补齐设备身份（device 为本账号独立十进制号）", a.UID)
 	}
 	return a, nil
 }

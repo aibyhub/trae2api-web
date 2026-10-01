@@ -29,7 +29,8 @@ type Auth struct {
 	Domain       string // "trae.cn"
 	ApiHost      string // "https://api.trae.com.cn"（ExchangeToken host）
 	MachineID    string // x-machine-id
-	DeviceID     string // x-device-id
+	DeviceID     string // x-device-id（十进制设备号，见 upstream/deviceid.go）
+	ProxyURL     string // 可选：本账号独立代理出口（http/https/socks5），空则走 TW2A_PROXY_URL 或直连
 	UID          string
 	EnterpriseID string
 	Nickname     string
@@ -81,16 +82,17 @@ func (a *Auth) NeedsRefreshLocked(within time.Duration) bool {
 //
 //	{"account":{...},"auth":{...}}
 func parseNested(raw []byte) (*Auth, error) {
-	var n struct {
-		Auth struct {
-			AccessToken  string `json:"accessToken"`
-			RefreshToken string `json:"refreshToken"`
-			ExpiresAt    int64  `json:"expiresAt"`
-			Domain       string `json:"domain"`
-			ApiHost      string `json:"apiHost"`
-			MachineID    string `json:"machineId"`
-			DeviceID     string `json:"deviceId"`
-		} `json:"auth"`
+		var n struct {
+			Auth struct {
+				AccessToken  string `json:"accessToken"`
+				RefreshToken string `json:"refreshToken"`
+				ExpiresAt    int64  `json:"expiresAt"`
+				Domain       string `json:"domain"`
+				ApiHost      string `json:"apiHost"`
+				MachineID    string `json:"machineId"`
+				DeviceID     string `json:"deviceId"`
+				ProxyURL     string `json:"proxyUrl"`
+			} `json:"auth"`
 		Account struct {
 			UID          string `json:"uid"`
 			EnterpriseID string `json:"enterpriseId"`
@@ -108,6 +110,7 @@ func parseNested(raw []byte) (*Auth, error) {
 		ApiHost:      n.Auth.ApiHost,
 		MachineID:    n.Auth.MachineID,
 		DeviceID:     n.Auth.DeviceID,
+		ProxyURL:     n.Auth.ProxyURL,
 		UID:          n.Account.UID,
 		EnterpriseID: n.Account.EnterpriseID,
 		Nickname:     n.Account.Nickname,
@@ -126,6 +129,7 @@ func parseFlat(raw []byte) (*Auth, error) {
 		ApiHost      string `json:"apiHost"`
 		MachineID    string `json:"machineId"`
 		DeviceID     string `json:"deviceId"`
+		ProxyURL     string `json:"proxyUrl"`
 		UID          string `json:"uid"`
 		EnterpriseID string `json:"enterpriseId"`
 		Nickname     string `json:"nickname"`
@@ -141,6 +145,7 @@ func parseFlat(raw []byte) (*Auth, error) {
 		ApiHost:      f.ApiHost,
 		MachineID:    f.MachineID,
 		DeviceID:     f.DeviceID,
+		ProxyURL:     f.ProxyURL,
 		UID:          f.UID,
 		EnterpriseID: f.EnterpriseID,
 		Nickname:     f.Nickname,
@@ -199,6 +204,7 @@ func (a *Auth) saveAtomicLocked() error {
 			"apiHost":      a.ApiHost,
 			"machineId":    a.MachineID,
 			"deviceId":     a.DeviceID,
+			"proxyUrl":     a.ProxyURL,
 		},
 		"account": map[string]any{
 			"uid":          a.UID,

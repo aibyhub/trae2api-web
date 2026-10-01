@@ -33,6 +33,27 @@ func main() {
 	}
 	log.Printf("loaded %d account(s) from %s", len(auths), cfg.AuthDir)
 
+	// 存量迁移：hex32/UUID 设备号 → 本账号独立十进制号（claim 9074 根因修复，
+	// 见 upstream/deviceid.go；已是十进制的号不动）。
+	for _, a := range auths {
+		if upstream.IsDecimalDeviceID(a.DeviceID) {
+			continue
+		}
+		did, derr := upstream.NewDeviceID()
+		if derr != nil {
+			log.Printf("device id migrate uid=%s: %v", a.UID, derr)
+			continue
+		}
+		old := a.DeviceID
+		a.DeviceID = did
+		if err := a.SaveAtomic(); err != nil {
+			log.Printf("device id migrate save uid=%s: %v", a.UID, err)
+			a.DeviceID = old
+			continue
+		}
+		log.Printf("device id migrate uid=%s: %s → %s", a.UID, old, did)
+	}
+
 	p := pool.New(cfg.StateFile)
 	p.SyncToDir(auths) // 对齐：剔除 state.json 中已删除 auth 文件的幽灵账号
 

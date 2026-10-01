@@ -5,7 +5,7 @@
 #   docker compose up -d --wait
 services:
   tw2api:
-    image: ghcr.io/aibyhub/trae2api-web:1.1.5
+    image: ghcr.io/aibyhub/trae2api-web:1.1.6
     container_name: trae2api-web
     restart: unless-stopped
     mem_limit: 256m
@@ -21,11 +21,13 @@ services:
       # API Key 只从环境变量读取（不落 config.json）。
       # 1Panel 部署时在「环境变量」框填：TW2A_API_KEY=你的随机密钥（openssl rand -hex 32）
       TW2A_API_KEY: ${TW2A_API_KEY:?set TW2A_API_KEY in 1Panel env box or .env}
-      # UG 通道（签到/积分）强制设备号：必须是上游注册过的真实设备号
-      # （TRAE 客户端 debug.log 的 device_id，16 位纯数字）。
-      # 随机设备号签到必被 9074 拒；同一注册设备号每日仅一签（跨账号共享，
-      # 其余账号 9095 按已签到处理）。不设置则用 auth 文件内的 deviceId。
+      # UG 通道（签到/积分）强制设备号。一般无需设置：v1.1.6 起每账号自动生成
+      # 并持久化独立十进制设备号（见 auths/trae-*.json 的 deviceId）。
+      # 仅当想把所有账号钉在同一个已注册设备号时使用（注意每设备每日一签）。
       # TW2A_UG_DEVICE_ID: "4000000000000000"
+      # 全局兜底代理（账号 auth 文件里 proxyUrl 的优先级更高）：
+      # 支持 http/https/socks5，如 http://user:pass@1.2.3.4:8080。
+      # TW2A_PROXY_URL: "http://127.0.0.1:7890"
     # 镜像默认用户 app:app（10001:10001）
     user: "10001:10001"
     volumes:

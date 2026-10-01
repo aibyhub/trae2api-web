@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"trae2api-web/internal/auth"
+	"trae2api-web/internal/upstream"
 )
 
 // pendingState pending 登录状态。
@@ -69,7 +70,9 @@ func (h *Handler) adminLoginStart(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusInternalServerError, "rand_failed", err.Error())
 		return
 	}
-	deviceID, err := randomHex(16)
+	// 设备号必须是十进制（12~20 位数字）：hex32/UUID 会被上游 claim 9074 拒，
+	// 且每设备每日一签（跨账号）→ 每账号独立号（见 upstream/deviceid.go）。
+	deviceID, err := upstream.NewDeviceID()
 	if err != nil {
 		writeOpenAIError(w, http.StatusInternalServerError, "rand_failed", err.Error())
 		return
@@ -166,6 +169,13 @@ func (h *Handler) authorizeCallback(w http.ResponseWriter, r *http.Request) {
 			if pl, ok := h.getPendingByTrace(traceID); ok {
 				machineID, deviceID = pl.machineID, pl.deviceID
 			}
+		}
+	}
+	// 兜底链路（手工回调/老脚本）拿到的 device_id 可能非十进制或缺失：
+	// 统一重造为本账号独立十进制号（9074 根因，见 upstream/deviceid.go）。
+	if !upstream.IsDecimalDeviceID(deviceID) {
+		if did, derr := upstream.NewDeviceID(); derr == nil {
+			deviceID = did
 		}
 	}
 

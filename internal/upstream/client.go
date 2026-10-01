@@ -9,7 +9,10 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
+	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"trae2api-web/internal/auth"
@@ -104,7 +107,13 @@ type Client struct {
 	UgHost    string // https://api.trae.cn
 	OAuthHost string // https://api.trae.com.cn
 	ClientID  string // en1oxy7wnw8j9n
+
+	// proxyClients 按代理 URL 缓存的客户端对（std/stream），支撑每账号独立出口。
+	proxyClients sync.Map // string → *proxyPair
 }
+
+// proxyPair 一个代理出口对应的客户端对；std 有总超时（短请求），stream 无（SSE）。
+type proxyPair struct{ std, stream *http.Client }
 
 // New 生产默认值。配置连接池减少 TLS 握手。
 func New() *Client {
@@ -128,9 +137,68 @@ func (c *Client) agentBase() string { return c.AgentHost }
 func (c *Client) ugBase() string    { return c.UgHost }
 func (c *Client) oauthBase() string { return c.OAuthHost }
 
+// proxyEnv TW2A_PROXY_URL 全局兜底代理（账号未配置 proxyUrl 时使用）。
+// 环境变量进程内不变，读一次缓存。
+var (
+	proxyEnvOnce sync.Once
+	proxyEnvVal  string
+)
+
+func proxyEnv() string {
+	proxyEnvOnce.Do(func() { proxyEnvVal = strings.TrimSpace(os.Getenv("TW2A_PROXY_URL")) })
+	return proxyEnvVal
+}
+
+// clientFor 返回该账号可用的 HTTP 客户端（按账号独立代理出口）。
+// 优先级：auth 文件 proxyUrl > TW2A_PROXY_URL > 直连（默认客户端）。
+// 代理 URL 支持 http/https/socks5；非法配置记日志后直连（结果同样缓存，避免刷日志）。
+// 默认路径（无代理）与 v1.1.5 之前行为完全一致，测试注入的 mock 客户端不受影响。
+func (c *Client) clientFor(a *auth.Auth) (std, stream *http.Client) {
+	std, stream = c.HTTP, c.StreamHTTP
+	if stream == nil {
+		stream = std
+	}
+	proxy := ""
+	if a != nil {
+		proxy = strings.TrimSpace(a.ProxyURL)
+	}
+	if proxy == "" {
+		proxy = proxyEnv()
+	}
+	if proxy == "" {
+		return std, stream
+	}
+	if v, ok := c.proxyClients.Load(proxy); ok {
+		p := v.(*proxyPair)
+		return p.std, p.stream
+	}
+	u, err := url.Parse(proxy)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https" && u.Scheme != "socks5") {
+		log.Printf("proxy config invalid (%q) — fallback to direct", proxy)
+		p := &proxyPair{std: std, stream: stream}
+		c.proxyClients.Store(proxy, p)
+		return p.std, p.stream
+	}
+	var tr *http.Transport
+	if base, ok := c.HTTP.Transport.(*http.Transport); ok && base != nil {
+		tr = base.Clone() // 复制连接池/超时兜底设置（Clone 不复制连接），再覆盖代理
+	} else {
+		tr = &http.Transport{}
+	}
+	tr.Proxy = http.ProxyURL(u)
+	p := &proxyPair{
+		std:    &http.Client{Timeout: c.HTTP.Timeout, Transport: tr},
+		stream: &http.Client{Transport: tr}, // 无总超时（SSE）
+	}
+	c.proxyClients.Store(proxy, p)
+	return p.std, p.stream
+}
+
 // doJSON 发请求并解 JSON；HTTP 非 2xx 时返回带 body 片段的 *Error。
-func (c *Client) doJSON(req *http.Request) (json.RawMessage, error) {
-	resp, err := c.HTTP.Do(req)
+// 传输客户端按账号代理解析（clientFor）。
+func (c *Client) doJSON(req *http.Request, a *auth.Auth) (json.RawMessage, error) {
+	hc, _ := c.clientFor(a)
+	resp, err := hc.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -188,7 +256,7 @@ func (c *Client) refreshLocked(a *auth.Auth) error {
 		return err
 	}
 	OAuthHeaders(req)
-	data, err := c.doJSON(req)
+	data, err := c.doJSON(req, a)
 	if err != nil {
 		return err
 	}
@@ -239,10 +307,11 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 		return nil, 0, nil, err
 	}
 	SOLOHeaders(req, a, true)
-	// 用专用流客户端（无总超时），避免长 SSE 流被 HTTP.Timeout 截断。
-	hc := c.HTTP
-	if c.StreamHTTP != nil {
-		hc = c.StreamHTTP
+	// 用专用流客户端（无总超时），避免长 SSE 流被 HTTP.Timeout 截断；走账号代理出口。
+	_, sc := c.clientFor(a)
+	hc := sc
+	if hc == nil {
+		hc = c.HTTP
 	}
 	resp, err := hc.Do(req)
 	if err != nil {
@@ -285,7 +354,7 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 		return nil, err
 	}
 	SOLOHeaders(req, a, false)
-	data, err := c.doJSON(req)
+	data, err := c.doJSON(req, a)
 	if err != nil {
 		return nil, err
 	}
@@ -333,7 +402,7 @@ func (c *Client) CheckinStatus(a *auth.Auth) (checkedIn bool, credits int64, ena
 		return false, 0, false, err
 	}
 	UgHeaders(req, a)
-	data, err := c.doJSON(req)
+	data, err := c.doJSON(req, a)
 	if err != nil {
 		return false, 0, false, err
 	}
@@ -374,7 +443,7 @@ func (c *Client) CheckinClaim(a *auth.Auth) error {
 		return err
 	}
 	UgHeaders(req, a)
-	data, err := c.doJSON(req)
+	data, err := c.doJSON(req, a)
 	if err != nil {
 		return err
 	}
@@ -417,7 +486,7 @@ func (c *Client) EntUsage(a *auth.Auth) (remain, limit, used int64, packs int, e
 		return 0, 0, 0, 0, err
 	}
 	UgHeaders(req, a)
-	data, err := c.doJSON(req)
+	data, err := c.doJSON(req, a)
 	if err != nil {
 		return 0, 0, 0, 0, err
 	}
@@ -464,7 +533,7 @@ func (c *Client) GetUserInfo(a *auth.Auth) (uid, nickname, enterpriseID string, 
 	}
 	OAuthHeaders(req)
 	req.Header.Set("X-Cloudide-Token", a.JWT()) // 读锁快照
-	data, err := c.doJSON(req)
+	data, err := c.doJSON(req, a)
 	if err != nil {
 		return "", "", "", err
 	}
