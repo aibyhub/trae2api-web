@@ -516,9 +516,7 @@ function renderCredits(d){
       + remainLine + meta
       + (a.error ? '<div class="errline">'+esc(a.error)+'</div>' : '')
       + '<div class="card-foot"><span class="foot-note">积分有效期随权益包，详见明细</span>'
-      +   '<div>'+(a.packs_detail&&a.packs_detail.length
-      +     ? '<button class="btn sm" onclick="showPacks('+idx+')">积分明细 / 过期时间</button>' : '')
-      +   '</div></div>'
+      +   '<div>'+(a.packs_detail && a.packs_detail.length ? '<button class="btn sm" onclick="showPacks('+idx+')">积分明细 / 过期时间</button>' : '')+'</div>'
       + '</div>';
   }).join('');
   window._lastCredits = d.accounts;
