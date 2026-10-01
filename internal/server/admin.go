@@ -63,6 +63,7 @@ func (h *Handler) adminCredits(w http.ResponseWriter, r *http.Request) {
 				ac.Remain, ac.Limit, ac.Used = remain, limit, used
 				ac.Packs = len(packsDetail)
 				ac.PacksDetail = packsDetail
+				h.cfg.Pool.SetExpiry(s.UID, upstream.SoonestExpiry(packsDetail))
 			}
 			checkedIn, credits, enable, cerr := h.cfg.Upstream.CheckinStatus(a)
 			if cerr != nil {

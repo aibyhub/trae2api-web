@@ -1,9 +1,11 @@
 ﻿// Package pool 账号池：内存索引 + 冷却/禁用状态机 + state.json 持久化。
-// 挑选策略：healthy 账号中剩余积分最多者（SPEC §4.7）。
+// 挑选策略：healthy 账号中积分最近过期者优先（用掉快过期的额度），
+// 同过期时间比剩余积分；过期信息未知时退化为积分最多者。
 package pool
 
 import (
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -44,9 +46,10 @@ type Status struct {
 	Reason   string    `json:"reason,omitempty"`
 	// Disabled = session 失效硬禁用（需重登或换文件恢复）；Enabled = 软开关（用户可逆启停）。
 	// 对外暴露：Disabled 与 Enabled 都为 false 才算可被 Pick（healthy）。
-	Disabled bool `json:"disabled"`
-	Enabled  bool `json:"enabled"`
+	Disabled bool  `json:"disabled"`
+	Enabled  bool  `json:"enabled"`
 	ErrCount int   `json:"err_count,omitempty"`
+	ExpireAt int64 `json:"expire_at,omitempty"` // 最近一份仍有余量的权益包过期时刻（unix 秒）；0 = 未知
 }
 
 type entry struct {
@@ -57,6 +60,7 @@ type entry struct {
 	reason   string
 	until    time.Time
 	errCount int
+	expireAt int64 // 最近过期包（unix 秒）；0 = 未知
 }
 
 func (e *entry) healthy(now time.Time) bool {
@@ -72,10 +76,11 @@ func (e *entry) healthy(now time.Time) bool {
 // stateEntry state.json 单账号持久化条目。
 type stateEntry struct {
 	Credits  int64     `json:"credits"`
-	Disabled bool     `json:"disabled"`
+	Disabled bool      `json:"disabled"`
 	Enabled  *bool     `json:"enabled,omitempty"` // 指针：旧文件缺省时按 true 处理，不写回脏值
 	Reason   string    `json:"reason,omitempty"`
 	Until    time.Time `json:"until,omitempty"`
+	ExpireAt int64     `json:"expire_at,omitempty"` // 最近过期包（unix 秒）
 }
 
 // stateFile 持久化格式。
@@ -172,6 +177,8 @@ func (p *Pool) Pick() *auth.Auth {
 }
 
 // PickExcluding 同上，但跳过 tried 中的 uid（请求级轮换）。
+// 选号优先级：积分最近过期的账号优先（用过期前的额度），同期按剩余积分。
+// expireAt 未知（0）视为最晚，排在使用已知过期信息的账号之后。
 func (p *Pool) PickExcluding(tried map[string]bool) *auth.Auth {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -184,7 +191,7 @@ func (p *Pool) PickExcluding(tried map[string]bool) *auth.Auth {
 		if !e.healthy(now) {
 			continue
 		}
-		if best == nil || e.credits > best.credits {
+		if best == nil || expireFirst(e, best) {
 			best = e
 		}
 	}
@@ -192,6 +199,31 @@ func (p *Pool) PickExcluding(tried map[string]bool) *auth.Auth {
 		return nil
 	}
 	return best.a
+}
+
+// expireFirst 报告 a 是否应排在 b 之前（积分过期早者优先，未知者靠后；同过期比积分）。
+func expireFirst(a, b *entry) bool {
+	ea, eb := a.expireAt, b.expireAt
+	if ea == 0 {
+		ea = math.MaxInt64
+	}
+	if eb == 0 {
+		eb = math.MaxInt64
+	}
+	if ea != eb {
+		return ea < eb
+	}
+	return a.credits > b.credits
+}
+
+// SetExpiry 记录账号最近一份仍有余量的权益包过期时刻（unix 秒；0 = 未知）。
+// 数据源：scheduler 每日签到后的 EntUsageDetail 与面板额度刷新。
+func (p *Pool) SetExpiry(uid string, expireAt int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if e, ok := p.byUID[uid]; ok {
+		e.expireAt = expireAt
+	}
 }
 
 // SetCredits 更新账号积分。
@@ -315,6 +347,7 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		Disabled: e.disabled,
 		Enabled:  e.enabled,
 		ErrCount: e.errCount,
+		ExpireAt: e.expireAt,
 	}
 }
 
@@ -343,6 +376,7 @@ func (p *Pool) load() {
 			enabled:  enabled,
 			reason:   s.Reason,
 			until:    s.Until,
+			expireAt: s.ExpireAt,
 		}
 	}
 }
@@ -358,6 +392,7 @@ func (p *Pool) saveLocked() {
 			Disabled: e.disabled,
 			Reason:   e.reason,
 			Until:    e.until,
+			ExpireAt: e.expireAt,
 		}
 		// 仅在软关闭时写 enabled=false；默认 true 用 omitempty 省略，旧版本读为 true。
 		if !e.enabled {

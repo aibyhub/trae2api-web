@@ -618,11 +618,13 @@ async function loadRates(){
 }
 function renderRates(models){
   const el = document.getElementById('ratesTable');
-  if(!models.length){
+  // 只看官方实时展示的模型：剔除 custom_model_*（客户端里的自定义模型占位，上游未定义倍率）
+  const visible = models.filter(m=>!String(m.id||'').startsWith('custom_model_'));
+  if(!visible.length){
     el.innerHTML = '<div class="muted" style="padding:14px">暂无模型数据（等模型列表从上游拉取）。</div>';
     return;
   }
-  const sorted = [...models].sort((a,b)=>(b.rate||0)-(a.rate||0));
+  const sorted = [...visible].sort((a,b)=>(b.rate||0)-(a.rate||0));
   const rows = sorted.map(m=>{
     const rateCls = (m.rate||0) >= 0.5 ? 'b-bad' : (m.rate||0) >= 0.2 ? 'b-warn' : 'b-ok';
     return '<tr>'

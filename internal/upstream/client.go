@@ -508,6 +508,21 @@ type EntPack struct {
 	Status   int    `json:"status"`
 }
 
+// SoonestExpiry 返回仍有余量（limit-used>0）的包中最近的过期时刻；
+// 没有有效包返回 0（未知）。选号「积分先过期优先」用。
+func SoonestExpiry(packs []EntPack) int64 {
+	soonest := int64(0)
+	for _, p := range packs {
+		if p.Limit-p.Used <= 0 || p.ExpireAt <= 0 {
+			continue
+		}
+		if soonest == 0 || p.ExpireAt < soonest {
+			soonest = p.ExpireAt
+		}
+	}
+	return soonest
+}
+
 // EntUsageDetail 查询权益包全量明细（含过期时间；实测字段 display_desc /
 // group_name / expire_time（unix 秒）/ entitlement_base_info.quota.credits_limit /
 // usage.credits_amount）。remain = Σ(limit-used)，仅统计 limit>0 的包。

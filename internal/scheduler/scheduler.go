@@ -187,6 +187,9 @@ func (s *Scheduler) CheckinUID(uid string) Result {
 			} else {
 				res.Status = "error"
 				res.Error = claimErr.Error()
+				if strings.Contains(claimErr.Error(), "9074") {
+					res.Error += " —— 该账号的设备号未在上游注册：删除此账号，用面板「添加账号（TRAE 登录）」重新登录一次即可注册独立设备号"
+				}
 				log.Printf("checkin claim %s: %v", uid, claimErr)
 			}
 		} else {
@@ -194,10 +197,12 @@ func (s *Scheduler) CheckinUID(uid string) Result {
 			log.Printf("checkin %s: ok", uid)
 		}
 	}
-	// 查积分 + 解冻（无论签到结果，冷却账号按最新积分判断解冻）
-	if remain, err := s.cfg.Upstream.UserEntUsage(a); err != nil {
+	// 查积分 + 解冻（无论签到结果，冷却账号按最新积分判断解冻），
+	// 同时把「最近过期包」写回池，供选号「积分先过期优先」使用。
+	if packs, remain, _, _, err := s.cfg.Upstream.EntUsageDetail(a); err != nil {
 		log.Printf("ent-usage %s: %v", uid, err)
 	} else {
+		s.cfg.Pool.SetExpiry(uid, upstream.SoonestExpiry(packs))
 		s.cfg.Pool.ReenableIfCredits(uid, remain)
 	}
 	return res

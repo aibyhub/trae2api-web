@@ -10,7 +10,7 @@ on:
 
 env:
   IMAGE_NAME: ghcr.io/aibyhub/trae2api-web
-  IMAGE_VERSION: 1.2.0
+  IMAGE_VERSION: 1.2.1
 
 jobs:
   publish:
