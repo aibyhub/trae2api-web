@@ -122,9 +122,36 @@
   .muted { color:var(--dim); font-size:12px; }
   .log-ok { color:var(--ok); } .log-err { color:var(--bad); }
   @media (max-width:640px){ .remain{font-size:28px} .wrap{padding:18px 12px 60px} }
+  /* 面板登录页（可选：TW2A_ADMIN_PASSWORD） */
+  .gate { position:fixed; inset:0; background:var(--bg); display:none; align-items:center; justify-content:center; z-index:200; }
+  .gate.show { display:flex; }
+  .gate .card { background:var(--card); border:1px solid #2c3550; border-radius:16px; padding:28px;
+                width:min(360px,92vw); box-shadow:0 24px 70px #000a; text-align:center; }
+  .gate .glogo { width:52px; height:52px; border-radius:14px; display:flex; align-items:center; justify-content:center;
+                 background:linear-gradient(135deg,var(--accent),#7c5cff); color:#fff; font-weight:700; font-size:19px;
+                 margin:0 auto 14px; }
+  .gate h2 { font-size:16px; margin-bottom:6px; }
+  .gate input { width:100%; background:var(--bg); border:1px solid var(--line); border-radius:8px; color:var(--fg);
+                padding:10px 12px; font-size:14px; margin-top:14px; }
+  .gate input:focus { outline:none; border-color:var(--accent); }
+  .gate .btn { width:100%; margin-top:12px; }
+  .gate .gerr { color:var(--bad); font-size:12px; margin-top:10px; min-height:16px; }
+  body.locked .wrap { display:none; }
 </style>
 </head>
 <body>
+<!-- 面板登录（设了 TW2A_ADMIN_PASSWORD 才会出现） -->
+<div class="gate" id="loginGate">
+  <div class="card">
+    <div class="glogo">T2</div>
+    <h2>trae2api-web 控制台</h2>
+    <div class="muted">请输入面板密码</div>
+    <input id="gatePass" type="password" placeholder="面板密码" autocomplete="current-password"
+           onkeydown="if(event.key==='Enter')doAdminLogin()">
+    <button class="btn primary" id="gateBtn" onclick="doAdminLogin()">登录</button>
+    <div class="gerr" id="gateErr"></div>
+  </div>
+</div>
 <div class="wrap">
   <header>
     <div class="brand">
@@ -155,6 +182,14 @@
 
   <!-- 账号管理 -->
   <div id="pane-accounts" class="pane active">
+    <div class="panel">
+      <h2 style="display:flex;align-items:center;gap:10px">自动签到
+        <small style="color:var(--dim);font-weight:400">每天自动签到是否正常</small>
+        <button class="btn sm" style="margin-left:auto" onclick="loadCheckin()">刷新</button>
+      </h2>
+      <div id="checkinBoard"><div class="muted"><span class="spin"></span> 加载中...</div></div>
+    </div>
+
     <div class="panel">
       <h2>添加账号（TRAE 登录）</h2>
       <button class="btn primary" id="loginBtn" onclick="startLogin()">添加账号（TRAE 登录）</button>
@@ -206,6 +241,10 @@
     <div class="panel"><h2>按账号</h2><div id="usageByAcc"><div class="muted" style="padding:14px"><span class="spin"></span> 加载中...</div></div></div>
     <div class="panel"><h2>按模型</h2><div id="usageByModel"><div class="muted" style="padding:14px"></div></div></div>
     <div class="panel"><h2>使用明细<small style="color:var(--dim);font-weight:400;margin-left:8px">按账号分组，最新在前</small></h2><div id="usageGroups"><div class="muted" style="padding:14px"></div></div></div>
+    <div class="panel">
+      <h2>数据维护<small style="color:var(--dim);font-weight:400;margin-left:8px">日志保留与清理（usage.jsonl / checkin.jsonl，默认保留 90 天）</small></h2>
+      <div id="logMaintenance"><div class="muted"><span class="spin"></span> 加载中...</div></div>
+    </div>
   </div>
 
   <!-- 官方倍率 -->
@@ -295,9 +334,9 @@ function switchTab(name, el){
   refreshActive();
 }
 function refreshActive(){
-  if(activeTab==='accounts') loadAccounts();
+  if(activeTab==='accounts'){ loadAccounts(); loadCheckin(); }
   else if(activeTab==='credits') loadCredits();
-  else if(activeTab==='usage') loadUsage();
+  else if(activeTab==='usage'){ loadUsage(); loadLogs(); }
   else if(activeTab==='rates') loadRates();
   else if(activeTab==='proxies') loadProxies();
 }
@@ -950,8 +989,170 @@ async function registerDevice(uid){
   }catch(e){ opsStatusShow('err', '注册失败：'+e.message); }
 }
 
+/* ─── 面板登录（可选：TW2A_ADMIN_PASSWORD） ─── */
+let authRequired = false;
+function showLoginGate(msg){
+  authRequired = true;
+  const g = document.getElementById('loginGate');
+  if(!g) return;
+  g.classList.add('show');
+  document.body.classList.add('locked');
+  if(msg){ document.getElementById('gateErr').textContent = msg; }
+  setTimeout(function(){ const i=document.getElementById('gatePass'); if(i) i.focus(); }, 50);
+}
+function hideLoginGate(){
+  const g = document.getElementById('loginGate');
+  if(g) g.classList.remove('show');
+  document.body.classList.remove('locked');
+}
+async function doAdminLogin(){
+  const pw = (document.getElementById('gatePass')||{}).value || '';
+  const err = document.getElementById('gateErr');
+  const btn = document.getElementById('gateBtn');
+  if(!pw){ err.textContent = '请输入密码'; return; }
+  btn.disabled = true; err.textContent = '登录中...';
+  try{
+    const r = await fetch('/admin/login', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({password:pw})});
+    const d = await r.json().catch(function(){ return {}; });
+    if(!r.ok){ err.textContent = (d.error && d.error.message) || '密码不正确'; btn.disabled = false; return; }
+    location.reload();
+  }catch(e){ err.textContent = '登录失败：' + e.message; btn.disabled = false; }
+}
+async function bootPanel(){
+  let s = {};
+  try{ s = await (await fetch('/admin/session', {cache:'no-store'})).json(); }catch(e){ /* 探测失败按未启用登录处理 */ }
+  if(s.auth_required && !s.authenticated){ showLoginGate(); return; }
+  hideLoginGate();
+  loadAccounts();
+  loadCheckin();
+}
+// 会话过期统一兜底：任何面板接口 401 → 弹登录页（登录接口自身的 401 除外）
+(function(){
+  const _f = window.fetch.bind(window);
+  window.fetch = async function(input, init){
+    const r = await _f(input, init);
+    try{
+      const url = String(input && input.url ? input.url : input);
+      if(r.status === 401 && url.indexOf('/admin/login') < 0){ showLoginGate('登录已过期，请重新登录'); }
+    }catch(e){ /* ignore */ }
+    return r;
+  };
+})();
+
+/* ─── 自动签到看板 ─── */
+const CK_TEXT = {claimed:'已签到', already:'今日已签', error:'失败', checkin_off:'上游未开放', skipped:'跳过', none:'未执行'};
+const CK_CLS  = {claimed:'b-ok', already:'b-ok', error:'b-bad', checkin_off:'b-warn', skipped:'b-warn', none:'b-warn'};
+function ckBadge(s){ return badge(CK_TEXT[s] || s, CK_CLS[s] || 'b-warn'); }
+function dtText(ts){ return ts ? new Date(ts*1000).toLocaleString() : '-'; }
+async function loadCheckin(){
+  const el = document.getElementById('checkinBoard');
+  if(!el) return;
+  try{
+    const r = await fetch('/admin/api/checkin', {cache:'no-store'});
+    if(r.status === 501){ el.innerHTML = '<div class="muted">调度器未装配，无签到数据。</div>'; return; }
+    const d = await r.json();
+    if(d && d.error){ el.innerHTML = '<div class="muted">' + esc(apiErr(d)) + '</div>'; return; }
+    renderCheckin(d || {});
+  }catch(e){ el.innerHTML = '<div style="color:var(--bad)">加载失败：' + esc(e.message) + '</div>'; }
+}
+function renderCheckin(d){
+  const s = d.stats || {}, a = s.auto || {}, m = s.manual || {};
+  const need = (s.error||0) + (s.none||0);
+  let h = '<div style="display:flex;gap:26px;flex-wrap:wrap;align-items:flex-end">'
+    + '<div><div class="muted">今日已签到</div><div style="font-size:20px;font-weight:600">' + (s.signed||0) + ' / ' + (s.total||0) + '</div></div>'
+    + '<div><div class="muted">需要关注</div><div style="font-size:20px;font-weight:600;color:' + (need ? 'var(--bad)' : 'var(--ok)') + '">' + need + '</div></div>'
+    + '<div><div class="muted">自动成功率（今日）</div><div style="font-size:20px;font-weight:600">' + (a.rate == null ? '-' : a.rate + '%') + '</div></div>'
+    + '<div><div class="muted">下次自动签到</div><div style="font-size:15px;font-weight:600">' + esc(dtText(d.next_at)) + '</div></div>'
+    + '<div class="muted" style="margin-left:auto">自动 ' + (a.ok||0) + '/' + (a.total||0) + ' · 手动 ' + (m.ok||0) + '/' + (m.total||0)
+    + (d.notify && d.notify.configured ? ' · 推送已开(' + esc(d.notify.mode) + ')' : ' · 推送未配置') + '</div>'
+    + '</div>';
+  h += '<div class="muted" style="margin-top:6px">签到时点：' + ((d.hours||[]).map(function(x){ return x + ':00'; }).join('、') || '-')
+    + '（每号随机 0-' + (d.jitter_minutes||0) + ' 分钟）· 最近自动执行：' + (d.auto_last_at ? dtText(d.auto_last_at) : '今日无记录') + '</div>';
+  const pend = d.pending || [];
+  if(pend.length){
+    h += '<div style="margin-top:10px">';
+    pend.forEach(function(p){
+      h += '<div class="mono" style="color:var(--bad);margin-top:2px">⚠ ' + esc(p.nickname || p.uid) + '：' + esc(CK_TEXT[p.status] || p.status)
+        + (p.error ? '（' + esc(String(p.error).slice(0,140)) + '）' : '') + '</div>';
+    });
+    h += '</div>';
+  }
+  const days = d.days || [];
+  if(days.length){
+    h += '<div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">';
+    days.forEach(function(x){
+      const tot = (x.ok||0) + (x.error||0) + (x.off||0) + (x.skipped||0);
+      const cls = (x.error > 0 || tot === 0) ? 'b-warn' : 'b-ok';
+      h += badge(String(x.date).slice(5) + ' ' + (x.ok||0) + '/' + tot, cls);
+    });
+    h += '</div>';
+  }
+  const recent = (d.recent || []).slice(0, 12);
+  if(recent.length){
+    h += '<div class="tblwrap" style="margin-top:12px"><table class="accts"><thead><tr><th>时间</th><th>账号</th><th>结果</th><th>触发</th><th>说明</th></tr></thead><tbody>'
+      + recent.map(function(e){
+          return '<tr><td class="mono">' + esc(dtText(e.ts)) + '</td><td class="nick">' + esc(e.nickname || e.uid) + '</td>'
+            + '<td>' + ckBadge(e.status) + '</td><td class="muted">' + (e.manual ? '手动' : '自动') + '</td>'
+            + '<td class="mono">' + esc(e.error ? String(e.error).slice(0,140) : '-') + '</td></tr>';
+        }).join('')
+      + '</tbody></table></div>';
+  }else{
+    h += '<div class="muted" style="margin-top:10px">暂无签到记录（还没到签到时点，或日志已被清理）。</div>';
+  }
+  document.getElementById('checkinBoard').innerHTML = h;
+}
+
+/* ─── 数据维护（日志保留/清理） ─── */
+function fmtSize(n){ n = Number(n) || 0; return n > 1048576 ? (n/1048576).toFixed(1) + ' MB' : (n > 1024 ? Math.round(n/1024) + ' KB' : n + ' B'); }
+async function loadLogs(){
+  const el = document.getElementById('logMaintenance');
+  if(!el) return;
+  try{
+    const d = await (await fetch('/admin/api/logs', {cache:'no-store'})).json();
+    window._retDays = d.retention_days;
+    renderLogs(d);
+  }catch(e){ el.innerHTML = '<div style="color:var(--bad)">加载失败：' + esc(e.message) + '</div>'; }
+}
+function renderLogs(d){
+  const el = document.getElementById('logMaintenance');
+  if(!el) return;
+  const files = d.files || [], lp = d.last_prune || {};
+  const ret = (d.retention_days == null) ? window._retDays : d.retention_days;
+  let h = '<div class="muted">当前自动保留：<b>' + (ret > 0 ? ret + ' 天' : '不自动清理') + '</b>'
+    + (lp.at ? ' · 上次清理 ' + esc(dtText(lp.at)) + '（保留 ' + lp.days + ' 天，删除 usage ' + (lp.removed_usage||0) + ' / checkin ' + (lp.removed_checkin||0) + ' 条' + (lp.error ? '，错误：' + esc(lp.error) : '') + '）' : '')
+    + '</div>';
+  h += '<div class="tblwrap" style="margin-top:10px"><table class="accts"><thead><tr><th>文件</th><th>大小</th><th style="text-align:right">条数</th><th>最早</th><th>最新</th></tr></thead><tbody>'
+    + files.map(function(f){
+        return '<tr><td class="mono">' + esc(f.name) + '</td><td class="mono">' + fmtSize(f.size_bytes) + '</td>'
+          + '<td class="mono num" style="text-align:right">' + fmt(f.entries) + '</td>'
+          + '<td class="mono">' + esc(f.oldest_at ? dtText(f.oldest_at) : '-') + '</td>'
+          + '<td class="mono">' + esc(f.newest_at ? dtText(f.newest_at) : '-') + '</td></tr>';
+      }).join('')
+    + '</tbody></table></div>';
+  h += '<div class="imp-row" style="margin-top:10px"><span class="muted">手动清理：</span>'
+    + '<button class="btn sm" onclick="pruneLogs(30)">保留 30 天</button>'
+    + '<button class="btn sm" onclick="pruneLogs(90)">保留 90 天（3 个月）</button>'
+    + '<button class="btn sm" onclick="pruneLogs(180)">保留 180 天（6 个月）</button>'
+    + '<button class="btn sm danger" onclick="pruneLogs(0)">清空全部日志</button>'
+    + '<span id="logStatus" class="status-line" style="display:none"></span></div>';
+  el.innerHTML = h;
+}
+async function pruneLogs(days){
+  const clear = (days === 0);
+  const tip = clear ? '确认清空全部日志（usage.jsonl / checkin.jsonl）？不可恢复。'
+                    : '确认只保留最近 ' + days + ' 天的日志？更早的记录会被删除（不可恢复）。';
+  if(!confirm(tip)) return;
+  try{
+    const r = await fetch('/admin/api/logs/prune', {method:'POST', headers:{'Content-Type':'application/json', ...authHeader()}, body: JSON.stringify(clear ? {clear:true} : {days:days})});
+    const d = await r.json();
+    if(!r.ok){ alert('清理失败：' + apiErr(d)); return; }
+    renderLogs({files:d.files, last_prune:d.last_prune});
+    const st = document.getElementById('logStatus');
+    if(st){ st.style.display=''; st.className='status-line ok'; st.textContent='已删除 usage ' + (d.removed_usage||0) + ' 条 / checkin ' + (d.removed_checkin||0) + ' 条'; }
+  }catch(e){ alert('清理失败：' + e.message); }
+}
 /* 初始 */
-loadAccounts();
+bootPanel();
 </script>
 </body>
 </html>

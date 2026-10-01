@@ -41,6 +41,11 @@ type Config struct {
 	// CallbackBase 登录回调 base URL（远程部署/反代场景，如 http://1.2.3.4:18080）；
 	// 空 = 沿用旧行为 http://127.0.0.1:<port>/authorize。
 	CallbackBase string
+	// AdminPassword 面板登录密码（env TW2A_ADMIN_PASSWORD）；非空时 /admin/api/* 需登录
+	// 或带 Bearer API Key。内置登录页，可替代 Nginx Basic Auth。
+	AdminPassword string
+	// LogRetentionDays 日志保留天数（usage.jsonl / checkin.jsonl）；0 = 关闭自动清理。
+	LogRetentionDays int
 }
 
 // maxBodyBytes 请求体大小上限（8MB），超过返回 413。
@@ -58,6 +63,12 @@ type Handler struct {
 	// 回调 /authorize 捕获后标记成功；面板轮询 result 取结果。
 	loginMu sync.Mutex
 	logins  map[string]*pendingLogin
+
+	// admin 面板登录失败节流（仅设了密码时使用）。
+	admin adminAuth
+
+	// logs 数据维护状态（最近一次日志清理）。
+	logs logMaintenance
 }
 
 // NewHandler 构建 handler。
@@ -93,6 +104,7 @@ func NewHandler(cfg Config) *Handler {
 		cfg:     cfg,
 		mux:     http.NewServeMux(),
 		logins:  map[string]*pendingLogin{},
+		admin:   adminAuth{fails: map[string][]time.Time{}},
 		usage:   NewUsageStore(filepath.Join(cfg.DataDir, "usage.jsonl")),
 		proxies: NewProxyPool(filepath.Join(cfg.DataDir, "proxies.json")),
 	}
@@ -104,6 +116,10 @@ func NewHandler(cfg Config) *Handler {
 	// 读接口无鉴权（局域网内只读）；写接口（accounts 写/login/refresh/authorize）
 	// 经 withAdminAuth 校验 Bearer = TW2A_API_KEY（见 §4 安全设计）。
 	h.mux.HandleFunc("GET /admin", h.adminPage)
+	// 面板登录（可选：TW2A_ADMIN_PASSWORD）
+	h.mux.HandleFunc("GET /admin/session", h.adminSessionGet)
+	h.mux.HandleFunc("POST /admin/login", h.adminLogin)
+	h.mux.HandleFunc("POST /admin/logout", h.adminLogout)
 	h.mux.HandleFunc("GET /admin/api/credits", h.adminCredits)
 	// 账号 CRUD
 	h.mux.HandleFunc("GET /admin/api/accounts", h.adminAccounts)
@@ -125,6 +141,10 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("POST /admin/api/checkin_all", h.withAdminAuth(h.adminCheckinAll))
 	h.mux.HandleFunc("POST /admin/api/refresh_all", h.withAdminAuth(h.adminRefreshAll))
 	h.mux.HandleFunc("POST /admin/api/accounts/{uid}/checkin", h.withAdminAuth(h.adminCheckinOne))
+	// 签到看板 / 数据维护
+	h.mux.HandleFunc("GET /admin/api/checkin", h.adminCheckinBoard)
+	h.mux.HandleFunc("GET /admin/api/logs", h.adminLogsGet)
+	h.mux.HandleFunc("POST /admin/api/logs/prune", h.withAdminAuth(h.adminLogsPrune))
 	// 使用日志 + 官方模型倍率 + 代理池
 	h.mux.HandleFunc("GET /admin/api/usage", h.adminUsage)
 	h.mux.HandleFunc("GET /admin/api/rates", h.adminRatesGet)
@@ -139,31 +159,26 @@ func NewHandler(cfg Config) *Handler {
 	return h
 }
 
-// withAdminAuth 校验写操作的 Bearer API Key（常量时间比较，复用 withAuth 逻辑）。
-// APIKey 为空时（未配置 TW2A_API_KEY）退化为不鉴权——本地无 key 场景仍可用，
-// 但生产强烈建议配 key（见 PLAN §4）。
+// withAdminAuth 写操作鉴权：**有效会话 Cookie** 或 Bearer API Key 任一即可。
+// 面板登录一次后写操作不再需要手动填 key（key 通道保留给脚本/curl）。
+// 密码与 key 都没配时（本地裸用）不鉴权——保持历史行为。
 func (h *Handler) withAdminAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if h.cfg.APIKey == "" {
+		if h.authDisabled() || h.adminAuthorized(r) {
 			next(w, r)
 			return
 		}
-		authz := r.Header.Get("Authorization")
-		const prefix = "Bearer "
-		if len(authz) < len(prefix) || !strings.EqualFold(authz[:len(prefix)], prefix) {
-			writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
-			return
-		}
-		key := authz[len(prefix):]
-		if subtle.ConstantTimeCompare([]byte(key), []byte(h.cfg.APIKey)) != 1 {
-			writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
-			return
-		}
-		next(w, r)
+		writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "需要登录（或携带 Bearer API Key）")
 	}
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// 配了面板密码时，/admin/api/* 一律要求登录（读接口也一样）；
+	// 未配密码则保持历史行为（只读开放、写接口要 key）。
+	if !h.adminGate(r) {
+		writeOpenAIError(w, http.StatusUnauthorized, "unauthorized", "需要登录面板（/admin）")
+		return
+	}
 	h.mux.ServeHTTP(w, r)
 }
 

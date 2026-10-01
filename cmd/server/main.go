@@ -77,6 +77,11 @@ func main() {
 		JitterMinutes:  cfg.Schedule.JitterMinutes,
 		BalanceRefresh: time.Duration(cfg.Schedule.BalanceRefreshMin) * time.Minute,
 		RefreshSkew:    24 * time.Hour,
+
+		// 签到日志（面板「自动签到」看板）与结果推送。
+		LogPath:    filepath.Join(filepath.Dir(cfg.StateFile), "checkin.jsonl"),
+		Notifier:   scheduler.NewNotifier(cfg.CheckinWebhook),
+		NotifyMode: cfg.CheckinNotify,
 	})
 
 	h := server.NewHandler(server.Config{
@@ -93,6 +98,10 @@ func main() {
 		Sched:        sch, // /admin 手动签到/刷新按钮的执行体
 
 		CallbackBase: cfg.CallbackBase, // 空 = 回调仍用 127.0.0.1:<port>
+
+		AdminPassword: cfg.AdminPassword, // 非空 = 面板启用内置登录页
+
+		LogRetentionDays: cfg.LogRetentionDays, // 日志保留天数（0 = 关闭自动清理）
 	})
 
 	// 启动后异步自检代理池：出口 IP / 延迟 / 状态写回 data/proxies.json，面板直接可见。
@@ -102,6 +111,9 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go sch.Run(ctx)
+
+	// 日志保留：启动清理一次 + 每 24h 一次（usage.jsonl / checkin.jsonl）。
+	h.StartLogRetention(ctx)
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,

@@ -6,6 +6,7 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -87,6 +88,96 @@ func splitLines(raw []byte) [][]byte {
 		out = append(out, raw[start:])
 	}
 	return out
+}
+
+// Path 返回日志落盘路径（空 = 仅内存）。
+func (s *UsageStore) Path() string { return s.path }
+
+// Stats 返回日志概况（条数与最早/最新时间，unix 秒）。
+func (s *UsageStore) Stats() (entries int, oldest, newest int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entries = len(s.entries)
+	if entries > 0 {
+		oldest, newest = s.entries[0].TS/1000, s.entries[entries-1].TS/1000
+	}
+	return entries, oldest, newest
+}
+
+// Prune 按保留期裁剪：keepDays < 0 = 不动作；0 = 清空；>0 = 只保留最近 N 天。
+// 内存与落盘同时生效；轮转文件 .1 一并处理（全部过期则删除）。
+// keepDays：< 0 = 不动作；0 = 清空；> 0 = 只保留最近 N 天。
+func (s *UsageStore) Prune(keepDays int) (removed, kept int, err error) {
+	if keepDays < 0 {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return 0, len(s.entries), nil
+	}
+	var cutoff int64
+	if keepDays > 0 {
+		cutoff = time.Now().AddDate(0, 0, -keepDays).UnixMilli()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next := make([]UsageEntry, 0, len(s.entries))
+	for _, e := range s.entries {
+		if keepDays == 0 || e.TS < cutoff {
+			continue
+		}
+		next = append(next, e)
+	}
+	removed = len(s.entries) - len(next)
+	s.entries = next
+	if s.path != "" {
+		if err = s.rewriteLocked(); err != nil {
+			return removed, len(next), err
+		}
+		pruneRotatedUsage(s.path+".1", cutoff)
+	}
+	return removed, len(next), nil
+}
+
+// rewriteLocked 原子重写使用日志。
+func (s *UsageStore) rewriteLocked() error {
+	var buf bytes.Buffer
+	for _, e := range s.entries {
+		raw, err := json.Marshal(e)
+		if err != nil {
+			continue
+		}
+		buf.Write(raw)
+		buf.WriteByte('\n')
+	}
+	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
+		return err
+	}
+	tmp := s.path + ".tmp"
+	if err := os.WriteFile(tmp, buf.Bytes(), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, s.path)
+}
+
+// pruneRotatedUsage 裁剪轮转文件（ts 为毫秒）；cutoff<=0 表示全删。
+func pruneRotatedUsage(path string, cutoff int64) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var buf bytes.Buffer
+	for _, line := range splitLines(raw) {
+		var e UsageEntry
+		if json.Unmarshal(line, &e) == nil && (cutoff == 0 || e.TS < cutoff) {
+			continue
+		}
+		buf.Write(line)
+		buf.WriteByte('\n')
+	}
+	if buf.Len() == 0 {
+		_ = os.Remove(path)
+		return
+	}
+	_ = os.WriteFile(path, buf.Bytes(), 0o644)
 }
 
 // Add 记录一笔（内存 + 落盘）。

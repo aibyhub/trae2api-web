@@ -34,7 +34,7 @@ func (h *Handler) adminCheckinAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer opsMu.Unlock()
-	results := h.cfg.Sched.RunCheckinNow()
+	results := h.cfg.Sched.RunCheckinNowManual()
 	writeJSON(w, http.StatusOK, summarize(results))
 }
 
@@ -63,7 +63,7 @@ func (h *Handler) adminCheckinOne(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusNotFound, "not_found", "no auth for uid")
 		return
 	}
-	res := h.cfg.Sched.CheckinUID(uid)
+	res := h.cfg.Sched.CheckinUIDManual(uid)
 	writeJSON(w, http.StatusOK, map[string]any{"result": res})
 }
 

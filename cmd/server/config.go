@@ -13,13 +13,14 @@ import (
 
 // Config 顶层配置。
 type Config struct {
-	Listen       string `json:"listen"`        // ":7864"
-	CallbackPort string `json:"callback_port"` // "18080"（TRAE 登录回调监听端口，0 = 不起）
-	CallbackBase string `json:"callback_base"` // 登录回调 base URL（远程部署用，如 http://1.2.3.4:18080）；空 = 127.0.0.1:<port>
-	APIKey       string `json:"-"`             // 只读 env TW2A_API_KEY（不读 json）
-	AuthDir      string `json:"auth_dir"`      // "./auths"
-	StateFile    string `json:"state_file"`    // "./data/state.json"
-	DefaultModel string `json:"default_model"` // "glm-5.2"
+	Listen        string `json:"listen"`        // ":7864"
+	CallbackPort  string `json:"callback_port"` // "18080"（TRAE 登录回调监听端口，0 = 不起）
+	CallbackBase  string `json:"callback_base"` // 登录回调 base URL（远程部署用，如 http://1.2.3.4:18080）；空 = 127.0.0.1:<port>
+	APIKey        string `json:"-"`             // 只读 env TW2A_API_KEY（不读 json）
+	AdminPassword string `json:"-"`             // 只读 env TW2A_ADMIN_PASSWORD（面板登录密码；空 = 不启用登录页）
+	AuthDir       string `json:"auth_dir"`      // "./auths"
+	StateFile     string `json:"state_file"`    // "./data/state.json"
+	DefaultModel  string `json:"default_model"` // "glm-5.2"
 
 	Cooldown struct {
 		PlanCredit  string `json:"plan_credit"`   // "12h"
@@ -39,6 +40,13 @@ type Config struct {
 	Upstream struct {
 		TimeoutSeconds int `json:"timeout_seconds"` // 120
 	} `json:"upstream"`
+
+	// LogRetentionDays 日志保留天数（usage.jsonl / checkin.jsonl）：默认 90；0 = 不自动清理。
+	LogRetentionDays int `json:"log_retention_days"`
+	// CheckinWebhook 签到结果推送地址（企业微信/钉钉/飞书机器人）；空 = 不推送。
+	CheckinWebhook string `json:"checkin_webhook"`
+	// CheckinNotify 推送策略：fail（默认）/ always / never。
+	CheckinNotify string `json:"checkin_notify"`
 
 	// 解析后的 duration。
 	PlanCreditDur  time.Duration `json:"-"`
@@ -65,6 +73,8 @@ func Default() *Config {
 	c.Schedule.RefreshHours = []int{3}
 	c.Schedule.BalanceRefreshMin = 30
 	c.Upstream.TimeoutSeconds = 120
+	c.LogRetentionDays = 90
+	c.CheckinNotify = "fail"
 	return c
 }
 
@@ -94,6 +104,9 @@ func Load(path string) (*Config, error) {
 func applyEnv(c *Config) {
 	if v := os.Getenv("TW2A_API_KEY"); v != "" {
 		c.APIKey = v
+	}
+	if v := os.Getenv("TW2A_ADMIN_PASSWORD"); v != "" {
+		c.AdminPassword = v
 	}
 	if v := os.Getenv("TW2A_LISTEN"); v != "" {
 		c.Listen = v
@@ -153,6 +166,17 @@ func applyEnv(c *Config) {
 			c.Schedule.JitterMinutes = n
 		}
 	}
+	if v := os.Getenv("TW2A_LOG_RETENTION_DAYS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.LogRetentionDays = n
+		}
+	}
+	if v := os.Getenv("TW2A_CHECKIN_WEBHOOK"); v != "" {
+		c.CheckinWebhook = v
+	}
+	if v := os.Getenv("TW2A_CHECKIN_NOTIFY"); v != "" {
+		c.CheckinNotify = v
+	}
 	if v := os.Getenv("TW2A_TIMEOUT_SECONDS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			c.Upstream.TimeoutSeconds = n
@@ -176,6 +200,9 @@ func (c *Config) normalize() error {
 	}
 	if c.Upstream.TimeoutSeconds <= 0 {
 		c.Upstream.TimeoutSeconds = 120
+	}
+	if c.LogRetentionDays < 0 {
+		c.LogRetentionDays = 0
 	}
 	if c.DefaultModel == "" {
 		c.DefaultModel = "glm-5.2"
