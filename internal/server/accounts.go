@@ -207,7 +207,7 @@ func (h *Handler) importFromCallback(req importRequest) (*auth.Auth, error) {
 	// hex32/UUID 会被上游 9074 拒（「当前参与用户太多」为误导文案，
 	// 见 upstream/deviceid.go）；缺失或非十进制一律重新生成，
 	// machine_id 保持 hex32 不动。每账号独立设备号——上游按
-	// 「每设备每日一次」跨账号记账，共用号会让第二个账号被 9095 挡。
+	// 「每设备每日一次」跨账号记账。
 	genDev := false
 	if a.MachineID == "" {
 		if mid, rerr := randomHex(16); rerr == nil {
@@ -223,6 +223,14 @@ func (h *Handler) importFromCallback(req importRequest) (*auth.Auth, error) {
 	}
 	if genDev {
 		log.Printf("import: uid=%s 已补齐设备身份（device 为本账号独立十进制号）", a.UID)
+	}
+	// 设备注册：上游对部分（新）账号要求「注册过的设备」，未注册号 claim 一律 9074。
+	// 导入时自动向上游注册一台本账号专属设备并激活；失败退回生成的十进制号。
+	if did, rerr := h.cfg.Upstream.RegisterDevice(a); rerr == nil && upstream.IsDecimalDeviceID(did) {
+		a.DeviceID = did
+		log.Printf("import: uid=%s 已注册独立设备号 %s", a.UID, did)
+	} else if rerr != nil {
+		log.Printf("import: uid=%s 设备注册失败（退回随机号）: %v", a.UID, rerr)
 	}
 	return a, nil
 }
@@ -272,6 +280,13 @@ func (h *Handler) importFromJSON(req importRequest) (*auth.Auth, error) {
 	}
 	if genDev {
 		log.Printf("import: uid=%s 已补齐设备身份（device 为本账号独立十进制号）", a.UID)
+	}
+	// 设备注册（同 importFromJSON）：导入即注册本账号专属设备，绕开新号 9074。
+	if did, rerr := h.cfg.Upstream.RegisterDevice(a); rerr == nil && upstream.IsDecimalDeviceID(did) {
+		a.DeviceID = did
+		log.Printf("import: uid=%s 已注册独立设备号 %s", a.UID, did)
+	} else if rerr != nil {
+		log.Printf("import: uid=%s 设备注册失败（退回随机号）: %v", a.UID, rerr)
 	}
 	return a, nil
 }
@@ -392,6 +407,33 @@ func maskProxy(s string) string {
 		return u.Scheme + "://***@" + u.Host
 	}
 	return u.Scheme + "://" + u.Host
+}
+
+// adminRegisterDevice POST /admin/api/accounts/{uid}/device_register：
+// 为存量账号向上游注册一台新设备并启用（修复 claim 9074「设备未注册」）。
+func (h *Handler) adminRegisterDevice(w http.ResponseWriter, r *http.Request) {
+	uid := r.PathValue("uid")
+	a := h.cfg.Pool.AuthByUID(uid)
+	if a == nil {
+		writeOpenAIError(w, http.StatusNotFound, "not_found", "no auth for uid")
+		return
+	}
+	did, err := h.cfg.Upstream.RegisterDevice(a)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	old := a.DeviceID
+	a.DeviceID = did
+	if a.FilePath == "" {
+		a.FilePath = auth.FilePathFor(h.cfg.AuthDir, uid)
+	}
+	if err := a.SaveAtomic(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "save: " + err.Error()})
+		return
+	}
+	log.Printf("device registered uid=%s: %s → %s", uid, old, did)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "device_id": did, "old": old})
 }
 
 // adminProxyTest POST /admin/api/accounts/{uid}/proxy_test：用该账号当前

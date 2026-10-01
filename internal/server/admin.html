@@ -315,6 +315,7 @@ function renderAccounts(accts){
       + '<button class="btn sm" onclick="checkinAcct(\''+esc(a.uid)+'\')">签到</button>'
       + '<button class="btn sm" onclick="refreshAcct(\''+esc(a.uid)+'\')">刷新token</button>'
       + '<button class="btn sm" onclick="showProxy(\''+esc(a.uid)+'\')">代理</button>'
+      + '<button class="btn sm" onclick="registerDevice(\''+esc(a.uid)+'\')">设备</button>'
       + '<button class="btn sm" onclick="showJSON(\''+esc(a.uid)+'\')">JSON</button>'
       + '<button class="btn sm danger" onclick="deleteAcct(\''+esc(a.uid)+'\')">删除</button>'
       + '</div></td>'
@@ -675,6 +676,18 @@ async function testProxy(uid){
     if(d.ok){ st.className='status-line ok'; st.textContent='连通正常：'+(d.latency_ms)+'ms，剩余 '+fmt(d.remain)+' 积分（代理 '+(d.proxy||'直连')+'）'; }
     else { st.className='status-line err'; st.textContent='失败：'+(d.error||'未知')+'（代理 '+(d.proxy||'直连')+'，'+(d.latency_ms||'?')+'ms）'; }
   }catch(e){ st.className='status-line err'; st.textContent='测试失败：'+e.message; }
+}
+/* ─── 设备重注册（修复 claim 9074「设备未注册」） ─── */
+async function registerDevice(uid){
+  if(!confirm('为账号 '+uid.slice(0,8)+'… 向上游注册一台新的独立设备并启用？\n（用于修复签到 9074「设备未注册」，不影响其他账号）')) return;
+  opsStatusShow('', '注册中...');
+  try{
+    const r = await fetch('/admin/api/accounts/'+encodeURIComponent(uid)+'/device_register', {method:'POST', headers: authHeader()});
+    const d = await r.json();
+    if(d.ok){ opsStatusShow('ok', '设备已注册：'+(d.device_id||'')+'（原 '+(d.old||'-')+'），下次签到即用新设备'); }
+    else { opsStatusShow('err', '注册失败：'+(d.error||'未知')); }
+    loadAccounts();
+  }catch(e){ opsStatusShow('err', '注册失败：'+e.message); }
 }
 
 /* 初始 */

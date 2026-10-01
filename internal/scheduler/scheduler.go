@@ -188,7 +188,7 @@ func (s *Scheduler) CheckinUID(uid string) Result {
 				res.Status = "error"
 				res.Error = claimErr.Error()
 				if strings.Contains(claimErr.Error(), "9074") {
-					res.Error += " —— 该账号的设备号未在上游注册：删除此账号，用面板「添加账号（TRAE 登录）」重新登录一次即可注册独立设备号"
+					res.Error += " —— 该账号的设备号未在上游注册：点账号行的「设备」按钮重新注册一台独立设备即可"
 				}
 				log.Printf("checkin claim %s: %v", uid, claimErr)
 			}

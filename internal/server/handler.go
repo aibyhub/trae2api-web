@@ -100,6 +100,7 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("PATCH /admin/api/accounts/{uid}", h.withAdminAuth(h.adminPatchAccount))
 	h.mux.HandleFunc("POST /admin/api/accounts/{uid}/refresh", h.withAdminAuth(h.adminRefreshAccount))
 	h.mux.HandleFunc("POST /admin/api/accounts/{uid}/proxy_test", h.withAdminAuth(h.adminProxyTest))
+	h.mux.HandleFunc("POST /admin/api/accounts/{uid}/device_register", h.withAdminAuth(h.adminRegisterDevice))
 	h.mux.HandleFunc("GET /admin/api/accounts/{uid}/json", h.adminAccountJSON)
 	// Web 登录闭环
 	h.mux.HandleFunc("POST /admin/api/login", h.withAdminAuth(h.adminLoginStart))
