@@ -186,7 +186,7 @@
   <div id="pane-accounts" class="pane active">
     <div class="panel">
       <h2 style="display:flex;align-items:center;gap:10px">自动签到
-        <small style="color:var(--dim);font-weight:400">每天自动签到是否正常</small>
+        <small style="color:var(--dim);font-weight:400">本地执行记录（自动 / 手动 / 失败原因）</small>
         <button class="btn sm" style="margin-left:auto" onclick="loadCheckin()">刷新</button>
       </h2>
       <div id="checkinBoard"><div class="muted"><span class="spin"></span> 加载中...</div></div>
@@ -221,6 +221,10 @@
 
   <!-- 额度监控 -->
   <div id="pane-credits" class="pane">
+    <div class="panel">
+      <span class="muted">卡片上的「上游：已签到 / 未签到」是 <b>TRAE 上游的真实状态</b>（checkin_credits/status）；「什么时候跑的、自动还是手动、失败原因」见「账号管理 → 自动签到」看板。
+      两者口径：<b>上游状态 = 结果</b>，<b>看板 = 我们做过什么</b>。卡片右下可直接点「签到」补签。</span>
+    </div>
     <div class="grid" id="grid"><div class="muted"><span class="spin"></span> 加载中...</div></div>
   </div>
 
@@ -488,16 +492,34 @@ async function refreshAllTokens(){
   }catch(e){ opsStatusShow('err', '刷新失败：'+e.message); }
   finally{ btn.disabled = false; }
 }
-async function checkinAcct(uid){
-  opsStatusShow('', '签到中（'+esc(uid.slice(0,8))+'）...');
+/* 统一签到入口：结果就近显示在传入的状态容器里（没有就退回账号页那条 opsStatus） */
+async function checkinOne(uid, statusEl){
+  const show = function(cls, text){
+    if(statusEl){ statusEl.style.display=''; statusEl.className='status-line'+(cls?' '+cls:''); statusEl.textContent=text; }
+    else { opsStatusShow(cls, text); }
+  };
+  show('', '签到中（'+esc(String(uid).slice(0,8))+'）...');
   try{
     const r = await fetch('/admin/api/accounts/'+encodeURIComponent(uid)+'/checkin', {method:'POST', headers: authHeader()});
     const d = await r.json();
-    if(!r.ok){ opsStatusShow('err', '签到失败：'+apiErr(d)); return; }
+    if(!r.ok){ show('err', '签到失败：'+apiErr(d)); return; }
     const res = d.result || {};
-    opsStatusShow(res.status==='error'?'err':'ok', '签到结果（'+esc((res.uid||uid).slice(0,8))+'）：'+opText(res));
-    loadAccounts();
-  }catch(e){ opsStatusShow('err', '签到失败：'+e.message); }
+    show(res.status==='error'?'err':'ok', '签到结果：'+opText(res));
+  }catch(e){ show('err','签到失败：'+e.message); }
+}
+async function checkinAcct(uid){
+  await checkinOne(uid, null);
+  loadAccounts();
+}
+// 额度监控卡片里的签到：成功后 1.2s 重新拉一次，让上游徽标切到「上游：已签到」
+async function checkinFromCredits(uid){
+  await checkinOne(uid, document.getElementById('ckst-'+uid));
+  setTimeout(loadCredits, 1200);
+}
+// 签到看板里「未执行/失败」的补签：成功后刷新看板
+async function checkinFromBoard(uid){
+  await checkinOne(uid, document.getElementById('ckstB-'+uid));
+  setTimeout(loadCheckin, 1500);
 }
 
 /* ─── 导入 ─── */
@@ -582,8 +604,8 @@ function renderCredits(d){
     let badges = '';
     if(a.error) badges += badge('查询失败','b-bad');
     else {
-      if(a.checked_in) badges += badge('已签到','b-ok');
-      else badges += a.checkin_enable ? badge('未签到','b-warn') : badge('签到禁用','b-dim');
+      if(a.checked_in) badges += badge('上游：已签到','b-ok');
+      else badges += a.checkin_enable ? badge('上游：未签到','b-warn') : badge('上游：签到未开放','b-dim');
       if(a.cooling) badges += badge('冷却中','b-warn');
       if(a.disabled) badges += badge('已禁用','b-bad');
     }
@@ -599,6 +621,7 @@ function renderCredits(d){
     }
     const detailBtn = (a.packs_detail && a.packs_detail.length)
       ? '<button class="btn sm" onclick="showPacks('+idx+')">积分明细 / 过期时间</button>' : '';
+    const ckBtn = a.error ? '' : '<button class="btn sm" onclick="checkinFromCredits(\''+esc(a.uid)+'\')">签到</button>';
     const remainLine = a.error ? '<div style="color:var(--bad);font-size:14px;margin-top:14px">额度查询失败</div>'
       : '<div class="credits"><div class="remain">'+fmt(a.remain)+'<span>积分剩余</span></div></div>';
     const meta = a.error ? '' :
@@ -613,9 +636,10 @@ function renderCredits(d){
       + '<div class="card-top"><div><div class="nick">'+esc(a.nickname||'(未命名)')+'</div>'
       + '<div class="uid">'+esc(a.uid)+'</div></div>'
       + '<div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px">'
-      + '<div class="badges">'+badges+'</div>'+detailBtn+'</div></div>'
+      + '<div class="badges">'+badges+'</div>'+ckBtn+detailBtn+'</div></div>'
       + remainLine + meta
       + (a.error ? '<div class="errline">'+esc(a.error)+'</div>' : '')
+      + '<div id="ckst-'+esc(a.uid)+'" class="status-line" style="display:none;margin-top:8px"></div>'
       + '</div>';
   }).join('');
 }
@@ -1087,8 +1111,10 @@ function renderCheckin(d){
   if(pend.length){
     h += '<div style="margin-top:10px">';
     pend.forEach(function(p){
-      h += '<div class="mono" style="color:var(--bad);margin-top:2px">⚠ ' + esc(p.nickname || p.uid) + '：' + esc(CK_TEXT[p.status] || p.status)
-        + (p.error ? '（' + esc(String(p.error).slice(0,140)) + '）' : '') + '</div>';
+      h += '<div class="mono" style="color:var(--bad);margin-top:4px">⚠ ' + esc(p.nickname || p.uid) + '：' + esc(CK_TEXT[p.status] || p.status)
+        + (p.error ? '（' + esc(String(p.error).slice(0,140)) + '）' : '')
+        + ' <button class="btn sm" onclick="checkinFromBoard(\'' + esc(p.uid) + '\')">补签</button>'
+        + '<span id="ckstB-' + esc(p.uid) + '" class="status-line" style="display:none;margin-left:8px"></span></div>';
     });
     h += '</div>';
   }

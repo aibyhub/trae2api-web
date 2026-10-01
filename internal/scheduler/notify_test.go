@@ -74,3 +74,21 @@ func TestTodayDigest(t *testing.T) {
 		t.Fatalf("digest text=%s", text)
 	}
 }
+
+// TestRunCheckinNowLogsSkip 没有 refreshToken 的账号必须留下 skipped 记录（不再静默跳过）。
+func TestRunCheckinNowLogsSkip(t *testing.T) {
+	pl := pool.New("")
+	pl.Add(&auth.Auth{UID: "u1"}) // 故意不带 refreshToken
+	s := New(Config{Pool: pl, LogPath: filepath.Join(t.TempDir(), "checkin.jsonl")})
+	res := s.RunCheckinNowManual()
+	if len(res) != 1 || res[0].Status != "skipped" {
+		t.Fatalf("results=%+v want one skipped", res)
+	}
+	entries := s.RecentCheckins(10)
+	if len(entries) != 1 || entries[0].Status != "skipped" || entries[0].UID != "u1" {
+		t.Fatalf("log=%+v want one skipped entry for u1", entries)
+	}
+	if !entries[0].Manual || entries[0].Error == "" {
+		t.Fatalf("entry=%+v want manual + reason", entries[0])
+	}
+}

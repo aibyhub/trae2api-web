@@ -151,6 +151,8 @@ func (s *Scheduler) scheduleCheckins(ctx context.Context) {
 		}
 		a := s.cfg.Pool.AuthByUID(st.UID)
 		if a == nil || a.RefreshTokenValue() == "" {
+			// 静默跳过是"等了一整天却毫无记录"的最大困惑源：写进签到日志 + 打日志。
+			s.recordSkip(st.UID, st.Nickname, "无 refreshToken（需重新导入或重登该账号）", false)
 			continue
 		}
 		d := jitterDuration(window)
@@ -386,6 +388,16 @@ func (s *Scheduler) notifyDigest(trigger string) {
 	log.Printf("checkin notify sent (%s, kind=%s, has_fail=%v)", trigger, s.cfg.Notifier.Kind(), hasFail)
 }
 
+// recordSkip 记录「本次没跑到」的账号（例如没有 refreshToken / 找不到凭证）。
+// 目的：面板上"未执行"必须有据可查，而不是毫无痕迹。
+func (s *Scheduler) recordSkip(uid, nickname, reason string, manual bool) {
+	log.Printf("checkin skipped uid=%s: %s", uid, reason)
+	s.log.Add(CheckinLogEntry{
+		TS: time.Now().Unix(), UID: uid, Nickname: nickname,
+		Status: "skipped", Error: reason, Manual: manual,
+	})
+}
+
 // oneLine 把错误压成一行短文本。
 func oneLine(s string) string {
 	s = strings.Join(strings.Fields(s), " ")
@@ -410,6 +422,8 @@ func (s *Scheduler) runCheckinNow(manual bool) []Result {
 		}
 		a := s.cfg.Pool.AuthByUID(st.UID)
 		if a == nil || a.RefreshTokenValue() == "" {
+			s.recordSkip(st.UID, st.Nickname, "无 refreshToken（需重新导入或重登该账号）", manual)
+			out = append(out, Result{UID: st.UID, Status: "skipped", Error: "no refreshToken"})
 			continue
 		}
 		out = append(out, s.checkinUID(st.UID, manual))

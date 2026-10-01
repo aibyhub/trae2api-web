@@ -5,7 +5,7 @@
 #   docker compose up -d --wait
 services:
   tw2api:
-    image: ghcr.io/aibyhub/trae2api-web:1.2.12
+    image: ghcr.io/aibyhub/trae2api-web:1.2.13
     container_name: trae2api-web
     restart: unless-stopped
     mem_limit: 256m
