@@ -159,8 +159,10 @@
       <h1>trae2api-web 控制台<small>账号 · 额度 · 用量 · 倍率</small></h1>
     </div>
     <div class="toolbar">
+      <span id="authState" class="muted" style="display:none"></span>
       <span id="ts"></span>
       <button class="btn" onclick="refreshActive()">刷新</button>
+      <button class="btn sm" id="logoutBtn" style="display:none" onclick="adminLogout()">退出登录</button>
     </div>
   </header>
 
@@ -1023,8 +1025,21 @@ async function bootPanel(){
   try{ s = await (await fetch('/admin/session', {cache:'no-store'})).json(); }catch(e){ /* 探测失败按未启用登录处理 */ }
   if(s.auth_required && !s.authenticated){ showLoginGate(); return; }
   hideLoginGate();
+  if(s.auth_required){
+    const a = document.getElementById('authState');
+    if(a){ a.style.display=''; a.textContent = '已登录（会话）'; }
+    const b = document.getElementById('logoutBtn');
+    if(b){ b.style.display=''; }
+    const hint = document.querySelector('.keybar span:last-child');
+    if(hint){ hint.textContent = '已登录：写操作不再需要填 Key；脚本/curl 仍可用 Bearer Key。'; }
+  }
   loadAccounts();
   loadCheckin();
+}
+async function adminLogout(){
+  if(!confirm('退出面板登录？')) return;
+  try{ await fetch('/admin/logout', {method:'POST'}); }catch(e){ /* 忽略 */ }
+  location.reload();
 }
 // 会话过期统一兜底：任何面板接口 401 → 弹登录页（登录接口自身的 401 除外）
 (function(){
