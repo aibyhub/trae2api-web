@@ -149,7 +149,7 @@
     <div class="tab active" onclick="switchTab('accounts',this)">账号管理</div>
     <div class="tab" onclick="switchTab('credits',this)">额度监控</div>
     <div class="tab" onclick="switchTab('usage',this)">使用日志</div>
-    <div class="tab" onclick="switchTab('rates',this)">模型倍率</div>
+    <div class="tab" onclick="switchTab('rates',this)">官方倍率</div>
   </div>
 
   <!-- 账号管理 -->
@@ -198,17 +198,15 @@
       <label class="muted" style="display:flex;align-items:center;gap:6px">
         <input type="checkbox" id="usageAuto" onchange="toggleUsageAuto()"> 每 10 秒自动刷新
       </label>
-      <span class="muted">消耗 = total_tokens × 倍率（相对估算，非上游真实计费）</span>
+      <span class="muted">消耗 = total_tokens × 官方倍率（相对估算；真实扣分以积分余额/权益包为准）</span>
     </div>
     <div id="usageTable" class="tblwrap"><div class="muted" style="padding:14px"><span class="spin"></span> 加载中...</div></div>
   </div>
 
-  <!-- 模型倍率 -->
+  <!-- 官方倍率 -->
   <div id="pane-rates" class="pane">
-    <div class="panel" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-      <span class="muted">倍率用于使用日志的消耗估算（默认 1）。改完记得保存。</span>
-      <button class="btn primary" id="saveRatesBtn" onclick="saveRates()" style="margin-left:auto">保存倍率</button>
-      <span id="ratesStatus" class="status-line" style="display:none;margin:0"></span>
+    <div class="panel">
+      <span class="muted">以下倍率由上游定义（get_detail_param → display_contact_config.consumption_rate），与 TRAE 客户端同源、只读，随上游更新。使用日志的「消耗」= tokens × 官方倍率。</span>
     </div>
     <div id="ratesTable" class="tblwrap"><div class="muted" style="padding:14px"><span class="spin"></span> 加载中...</div></div>
   </div>
@@ -287,6 +285,7 @@ async function loadAccounts(){
   }
 }
 function renderAccounts(accts){
+  window._lastAccounts = accts;
   const el = document.getElementById('acctTable');
   if(!accts.length){
     el.innerHTML = '<div class="muted" style="padding:14px">暂无账号，点上方「添加账号」登录，或粘贴回调链接导入。</div>';
@@ -313,6 +312,7 @@ function renderAccounts(accts){
       + '<label class="toggle"><input type="checkbox" '+toggleChecked+' '+toggleDisabled+' onchange="toggleAcct(\''+esc(a.uid)+'\', this.checked)"><span class="slider"></span></label>'
       + '<button class="btn sm" onclick="checkinAcct(\''+esc(a.uid)+'\')">签到</button>'
       + '<button class="btn sm" onclick="refreshAcct(\''+esc(a.uid)+'\')">刷新token</button>'
+      + '<button class="btn sm" onclick="showProxy(\''+esc(a.uid)+'\')">代理</button>'
       + '<button class="btn sm" onclick="showJSON(\''+esc(a.uid)+'\')">JSON</button>'
       + '<button class="btn sm danger" onclick="deleteAcct(\''+esc(a.uid)+'\')">删除</button>'
       + '</div></td>'
@@ -485,6 +485,7 @@ function renderCredits(d){
     grid.innerHTML = '<div class="muted">暂无账号</div>';
     return;
   }
+  window._lastCredits = d.accounts;
   grid.innerHTML = d.accounts.map((a,idx)=>{
     let badges = '';
     if(a.error) badges += badge('查询失败','b-bad');
@@ -493,33 +494,38 @@ function renderCredits(d){
       else badges += a.checkin_enable ? badge('未签到','b-warn') : badge('签到禁用','b-dim');
       if(a.cooling) badges += badge('冷却中','b-warn');
       if(a.disabled) badges += badge('已禁用','b-bad');
-      if(a.packs>0) badges += badge(a.packs+' 权益包','b-acc');
     }
-    // 最近一个未过期包的过期时间
+    // 最近一个仍有余量的包的过期时间
     let soonest = 0;
     (a.packs_detail||[]).forEach(p=>{
-      if(p.limit>0 && p.expire_at && (!soonest || p.expire_at<soonest)) soonest = p.expire_at;
+      if(p.limit-(p.used||0) > 0 && p.expire_at && (!soonest || p.expire_at<soonest)) soonest = p.expire_at;
     });
-    const expNote = soonest
-      ? (()=>{ const dl = daysLeft(soonest);
-          const cls = dl<=7?'b-bad':(dl<=30?'b-warn':'b-dim');
-          return '<span style="margin-left:auto">'+badge('最近过期 '+fmtDate(soonest)+(dl<=3650?'（剩 '+dl+' 天）':''), cls)+'</span>'; })()
-      : '';
-    const remainLine = a.error ? '<div style="color:var(--bad);font-size:14px">额度查询失败</div>'
+    let soonBadge = '';
+    if(soonest){
+      const dl = daysLeft(soonest);
+      soonBadge = '<span>'+badge('最近过期 '+fmtDate(soonest)+'（剩 '+dl+' 天）', dl<=7?'b-bad':(dl<=30?'b-warn':'b-dim'))+'</span>';
+    }
+    const detailBtn = (a.packs_detail && a.packs_detail.length)
+      ? '<button class="btn sm" onclick="showPacks('+idx+')">积分明细 / 过期时间</button>' : '';
+    const remainLine = a.error ? '<div style="color:var(--bad);font-size:14px;margin-top:14px">额度查询失败</div>'
       : '<div class="credits"><div class="remain">'+fmt(a.remain)+'<span>积分剩余</span></div></div>';
     const meta = a.error ? '' :
-      '<div class="meta"><span>总量 <b>'+fmt(a.limit)+'</b></span><span>已用 <b>'+fmt(a.used)+'</b></span>'+
-      (a.checkin_enable ? '<span>今日可领 <b>'+fmt(a.checkin_credits)+'</b></span>' : '')+'</div>';
-    return '<div class="card'+(a.error?' err':'')+'">'
+      '<div class="meta" style="margin-top:2px">'
+      + '<span>总量 <b>'+fmt(a.limit)+'</b></span>'
+      + '<span>已用 <b>'+fmt(a.used)+'</b></span>'
+      + (a.checkin_enable ? '<span>今日可领 <b>'+fmt(a.checkin_credits)+'</b></span>' : '')
+      + (a.packs ? '<span><b>'+a.packs+'</b> 权益包</span>' : '')
+      + '</div>'
+      + '<div class="meta" style="margin-top:8px">'+soonBadge+'</div>';
+    return '<div class="card'+(a.error?' err':'')+'" style="margin-bottom:14px">'
       + '<div class="card-top"><div><div class="nick">'+esc(a.nickname||'(未命名)')+'</div>'
-      + '<div class="uid">'+esc(a.uid)+'</div></div><div class="badges">'+badges+'</div></div>'
+      + '<div class="uid">'+esc(a.uid)+'</div></div>'
+      + '<div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px">'
+      + '<div class="badges">'+badges+'</div>'+detailBtn+'</div></div>'
       + remainLine + meta
       + (a.error ? '<div class="errline">'+esc(a.error)+'</div>' : '')
-      + '<div class="card-foot"><span class="foot-note">积分有效期随权益包，详见明细</span>'
-      +   '<div>'+(a.packs_detail && a.packs_detail.length ? '<button class="btn sm" onclick="showPacks('+idx+')">积分明细 / 过期时间</button>' : '')+'</div>'
       + '</div>';
   }).join('');
-  window._lastCredits = d.accounts;
 }
 function showPacks(idx){
   const a = (window._lastCredits||[])[idx];
@@ -600,57 +606,71 @@ function renderUsage(d){
     + '</tr></thead><tbody>'+rows+'</tbody></table>';
 }
 
-/* ─── 模型倍率 ─── */
-let rateModels = [];
+/* ─── 官方倍率（上游定义，只读） ─── */
 async function loadRates(){
   try{
-    const [mr, mm] = await Promise.all([
-      fetch('/admin/api/rates', {cache:'no-store'}).then(r=>r.json()),
-      fetch('/v1/models', {headers: authHeader(), cache:'no-store'}).then(r=>r.json()).catch(()=>({data:[]}))
-    ]);
-    const rates = mr.rates || {};
-    rateModels = (mm.data||[]).map(m=>m.id);
-    Object.keys(rates).forEach(k=>{ if(!rateModels.includes(k)) rateModels.push(k); });
-    rateModels.sort();
-    renderRates(rates);
+    const r = await fetch('/admin/api/rates', {cache:'no-store'});
+    const d = await r.json();
+    renderRates(d.models||[]);
   }catch(e){
     document.getElementById('ratesTable').innerHTML = '<div style="color:var(--bad);padding:14px">加载失败：'+esc(e.message)+'</div>';
   }
 }
-function renderRates(rates){
+function renderRates(models){
   const el = document.getElementById('ratesTable');
-  if(!rateModels.length){
-    el.innerHTML = '<div class="muted" style="padding:14px">暂无模型（等模型列表拉取后再来配置）。</div>';
+  if(!models.length){
+    el.innerHTML = '<div class="muted" style="padding:14px">暂无模型数据（等模型列表从上游拉取）。</div>';
     return;
   }
-  const rows = rateModels.map(m=>{
-    const v = rates[m] != null ? rates[m] : 1;
-    return '<div class="rate-row">'
-      + '<span class="mono">'+esc(m)+'</span>'
-      + '<input type="number" step="0.1" min="0" max="1000" value="'+esc(v)+'" data-model="'+esc(m)+'">'
-      + '<span class="muted">倍率</span>'
-      + '</div>';
+  const sorted = [...models].sort((a,b)=>(b.rate||0)-(a.rate||0));
+  const rows = sorted.map(m=>{
+    const rateCls = (m.rate||0) >= 0.5 ? 'b-bad' : (m.rate||0) >= 0.2 ? 'b-warn' : 'b-ok';
+    return '<tr>'
+      + '<td class="mono">'+esc(m.id)+'</td>'
+      + '<td>'+esc(m.name||'-')+'</td>'
+      + '<td>'+badge((m.rate!=null&&m.rate>0?m.rate:'-')+'', rateCls)+'</td>'
+      + '<td class="mono">'+esc(m.fee_level!=null?m.fee_level:'-')+'</td>'
+      + '</tr>';
   }).join('');
-  el.innerHTML = rows;
+  el.innerHTML = '<table class="accts"><thead><tr>'
+    + '<th>模型 config_name</th><th>显示名</th><th>官方倍率</th><th>计费档位</th>'
+    + '</tr></thead><tbody>'+rows+'</tbody></table>';
 }
-async function saveRates(){
-  const inputs = document.querySelectorAll('#ratesTable input[data-model]');
-  const rates = {};
-  inputs.forEach(inp=>{
-    const v = parseFloat(inp.value);
-    if(!isNaN(v)) rates[inp.dataset.model] = v;
-  });
-  const btn = document.getElementById('saveRatesBtn'); btn.disabled = true;
-  const st = document.getElementById('ratesStatus');
+
+/* ─── 账号代理 ─── */
+function showProxy(uid){
+  const a = (window._lastAccounts||[]).find(x=>x.uid===uid) || {};
+  showModal('出口代理 — '+(a.nickname||uid),
+    '<div class="muted" style="margin-bottom:10px">为该账号配置独立代理出口（http/https/socks5），让不同账号走不同 IP，降低同 IP 多账号的风控关联。留空 = 直连（或全局 TW2A_PROXY_URL）。修改后对新请求生效。</div>'
+    + '<input id="proxyInput" class="imp" style="min-height:0;padding:8px 10px" placeholder="如 socks5://user:pass@1.2.3.4:1080 或 http://5.6.7.8:8080" value="'+esc(a.proxy||'')+'">'
+    + '<div class="imp-row"><button class="btn primary" onclick="saveProxy(\''+esc(uid)+'\')">保存</button>'
+    + '<button class="btn" onclick="testProxy(\''+esc(uid)+'\')">测试连通</button>'
+    + '<span id="proxyStatus" class="status-line" style="display:none;margin:0"></span></div>');
+}
+async function saveProxy(uid){
+  const v = document.getElementById('proxyInput').value.trim();
+  const st = document.getElementById('proxyStatus');
   st.style.display=''; st.className='status-line'; st.textContent='保存中...';
   try{
-    const r = await fetch('/admin/api/rates', {method:'PUT', headers:{'Content-Type':'application/json', ...authHeader()}, body: JSON.stringify({rates})});
+    const r = await fetch('/admin/api/accounts/'+encodeURIComponent(uid), {
+      method:'PATCH', headers:{'Content-Type':'application/json', ...authHeader()},
+      body: JSON.stringify({proxy_url: v})
+    });
     const d = await r.json();
     if(!r.ok){ st.className='status-line err'; st.textContent='保存失败：'+apiErr(d); return; }
-    st.className='status-line ok'; st.textContent='已保存（倍率即日对新的请求生效）';
-    setTimeout(()=>{ st.style.display='none'; }, 2500);
+    st.className='status-line ok'; st.textContent='已保存';
+    loadAccounts();
   }catch(e){ st.className='status-line err'; st.textContent='保存失败：'+e.message; }
-  finally{ btn.disabled = false; }
+}
+async function testProxy(uid){
+  const st = document.getElementById('proxyStatus');
+  st.style.display=''; st.className='status-line'; st.textContent='测试中（经该账号代理实调一次额度接口）...';
+  try{
+    const r = await fetch('/admin/api/accounts/'+encodeURIComponent(uid)+'/proxy_test', {method:'POST', headers: authHeader()});
+    const d = await r.json();
+    if(d.ok){ st.className='status-line ok'; st.textContent='连通正常：'+(d.latency_ms)+'ms，剩余 '+fmt(d.remain)+' 积分（代理 '+(d.proxy||'直连')+'）'; }
+    else { st.className='status-line err'; st.textContent='失败：'+(d.error||'未知')+'（代理 '+(d.proxy||'直连')+'，'+(d.latency_ms||'?')+'ms）'; }
+  }catch(e){ st.className='status-line err'; st.textContent='测试失败：'+e.message; }
 }
 
 /* 初始 */

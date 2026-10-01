@@ -1,13 +1,12 @@
-// usage.go 使用日志（每笔模型请求一条）+ 模型倍率配置。
+// usage.go 使用日志（每笔模型请求一条）+ 官方模型倍率查询。
 //
 // 日志：内存环形缓冲 + data/usage.jsonl 追加持久化（>8MB 轮转为 .1）。
-// 倍率：data/model_rates.json，{model: rate}，rate 为相对系数（默认 1），
-// 消耗估算 = total_tokens × rate（用于模型间相对成本对比，非上游真实计费）。
+// 倍率：来自上游 get_detail_param 的 consumption_rate（官方定义，只读），
+// 消耗估算 = total_tokens × 官方倍率（相对值，非上游真实计费结果）。
 package server
 
 import (
 	"encoding/json"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -168,74 +167,6 @@ func (s *UsageStore) Today() UsageToday {
 
 func round2(f float64) float64 { return float64(int64(f*100+0.5)) / 100 }
 
-// RateStore 模型倍率。
-type RateStore struct {
-	mu    sync.Mutex
-	path  string
-	rates map[string]float64
-}
-
-// NewRateStore 加载；文件不存在时全默认 1。
-func NewRateStore(path string) *RateStore {
-	r := &RateStore{path: path, rates: map[string]float64{}}
-	if raw, err := os.ReadFile(path); err == nil {
-		_ = json.Unmarshal(raw, &r.rates)
-	}
-	return r
-}
-
-// Get 模型倍率，未配置 = 1。
-func (r *RateStore) Get(model string) float64 {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if v, ok := r.rates[model]; ok && v >= 0 {
-		return v
-	}
-	return 1
-}
-
-// All 返回副本。
-func (r *RateStore) All() map[string]float64 {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	out := make(map[string]float64, len(r.rates))
-	for k, v := range r.rates {
-		out[k] = v
-	}
-	return out
-}
-
-// Set 全量替换（校验：模型名非空，0 <= rate <= 1000）。
-func (r *RateStore) Set(rates map[string]float64) error {
-	clean := make(map[string]float64, len(rates))
-	for m, v := range rates {
-		if m == "" || v < 0 || v > 1000 {
-			return os.ErrInvalid
-		}
-		clean[m] = v
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.path != "" {
-		if err := os.MkdirAll(filepath.Dir(r.path), 0o755); err != nil {
-			return err
-		}
-		raw, err := json.MarshalIndent(clean, "", "  ")
-		if err != nil {
-			return err
-		}
-		tmp := r.path + ".tmp"
-		if err := os.WriteFile(tmp, raw, 0o644); err != nil {
-			return err
-		}
-		if err := os.Rename(tmp, r.path); err != nil {
-			return err
-		}
-	}
-	r.rates = clean
-	return nil
-}
-
 // sortEntriesByTimeDesc 面板展示辅助（Recent 已保证，留作 API 兜底）。
 func sortEntriesByTimeDesc(es []UsageEntry) {
 	sort.Slice(es, func(i, j int) bool { return es[i].TS > es[j].TS })
@@ -281,24 +212,19 @@ func (h *Handler) adminUsage(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// adminRatesGet GET /admin/api/rates：模型倍率表。
+// adminRatesGet GET /admin/api/rates：官方模型倍率表（get_detail_param
+// display_contact_config.consumption_rate，上游定义，只读）。
 func (h *Handler) adminRatesGet(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"rates": h.rates.All()})
-}
-
-// adminRatesPut PUT /admin/api/rates：全量替换倍率表 {rates:{model:rate}}。
-func (h *Handler) adminRatesPut(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Rates map[string]float64 `json:"rates"`
+	infos := h.fetchDynamicModels()
+	out := make([]map[string]any, 0, len(infos))
+	for _, mi := range infos {
+		out = append(out, map[string]any{
+			"id":            mi.ID,
+			"name":          mi.Name,
+			"rate":          mi.Rate,
+			"fee_level":     mi.FeeLevel,
+			"context_length": mi.ContextWindow,
+		})
 	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
-		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "decode body: "+err.Error())
-		return
-	}
-	if err := h.rates.Set(req.Rates); err != nil {
-		writeOpenAIError(w, http.StatusBadRequest, "invalid_request",
-			"倍率非法：模型名不能为空，倍率需在 0~1000 之间")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"rates": h.rates.All(), "saved": true})
+	writeJSON(w, http.StatusOK, map[string]any{"models": out, "fetched_from": "upstream get_detail_param"})
 }

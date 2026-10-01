@@ -28,8 +28,9 @@ type Config struct {
 	} `json:"cooldown"`
 
 	Schedule struct {
-		CheckinHour  int   `json:"checkin_hour"`  // 9
-		RefreshHours []int `json:"refresh_hours"` // [3]
+		CheckinHour   int   `json:"checkin_hour"`           // 9
+		RefreshHours  []int `json:"refresh_hours"`          // [3]
+		JitterMinutes int   `json:"checkin_jitter_minutes"` // 签到随机延迟窗口（分钟），默认 60，负数关闭
 	} `json:"schedule"`
 
 	Upstream struct {
@@ -121,6 +122,11 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("TW2A_CHECKIN_HOUR"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			c.Schedule.CheckinHour = n
+		}
+	}
+	if v := os.Getenv("TW2A_CHECKIN_JITTER_MINUTES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Schedule.JitterMinutes = n
 		}
 	}
 	if v := os.Getenv("TW2A_TIMEOUT_SECONDS"); v != "" {

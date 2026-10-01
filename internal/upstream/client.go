@@ -333,8 +333,10 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status
 type ModelInfo struct {
 	ID            string
 	Name          string
-	ContextWindow int64 // = maxInputTokens
-	MaxTokens     int64 // = maxOutputTokens
+	ContextWindow int64   // = maxInputTokens
+	MaxTokens     int64   // = maxOutputTokens
+	Rate          float64 // 官方消耗倍率（display_contact_config.consumption_rate.data.rate），0 = 上游未下发
+	FeeLevel      int     // display_config.fee_model_level
 }
 
 // FetchModels 拉 SOLO 模型表（get_detail_param，32 配置）。
@@ -362,24 +364,44 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 		ConfigInfoList []struct {
 			ConfigName    string `json:"config_name"`
 			DisplayConfig struct {
-				DisplayName string `json:"display_name"`
+				DisplayName   string `json:"display_name"`
+				FeeModelLevel int    `json:"fee_model_level"`
 			} `json:"display_config"`
-			ModelDetailList []struct {
+			// display_contact_config 是内嵌 JSON 字符串，consumption_rate.data.rate
+			// 为该模型的官方积分消耗倍率（实测 Doubao-Seed-Evolving=0.08 等）。
+			DisplayContactConfig string `json:"display_contact_config"`
+			ModelDetailList      []struct {
 				ModelName string `json:"model_name"`
 			} `json:"model_detail_list"`
 		} `json:"config_info_list"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
-		return nil, fmt.Errorf("models parse: %w", err)
+		return nil, err
 	}
-	out := make([]ModelInfo, 0, len(resp.ConfigInfoList))
+	var out []ModelInfo
 	for _, cfg := range resp.ConfigInfoList {
 		if cfg.ConfigName == "" {
 			continue
 		}
+		rate := 0.0
+		if cfg.DisplayContactConfig != "" {
+			var contact struct {
+				ConsumptionRate struct {
+					Enable bool `json:"enable"`
+					Data   struct {
+						Rate float64 `json:"rate"`
+					} `json:"data"`
+				} `json:"consumption_rate"`
+			}
+			if json.Unmarshal([]byte(cfg.DisplayContactConfig), &contact) == nil && contact.ConsumptionRate.Enable {
+				rate = contact.ConsumptionRate.Data.Rate
+			}
+		}
 		out = append(out, ModelInfo{
-			ID:   cfg.ConfigName,
-			Name: cfg.DisplayConfig.DisplayName,
+			ID:       cfg.ConfigName,
+			Name:     cfg.DisplayConfig.DisplayName,
+			Rate:     rate,
+			FeeLevel: cfg.DisplayConfig.FeeModelLevel,
 		})
 	}
 	if len(out) == 0 {

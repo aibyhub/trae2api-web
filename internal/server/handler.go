@@ -45,7 +45,6 @@ type Handler struct {
 	mux *http.ServeMux
 
 	usage *UsageStore // 使用日志（每笔模型请求）
-	rates *RateStore  // 模型倍率
 
 	// Web 登录 pending 态：pendingID → 登录进行中的临时上下文。
 	// 回调 /authorize 捕获后标记成功；面板轮询 result 取结果。
@@ -80,11 +79,10 @@ func NewHandler(cfg Config) *Handler {
 		cfg.DataDir = "data"
 	}
 	h := &Handler{
-		cfg:   cfg,
-		mux:   http.NewServeMux(),
+		cfg:    cfg,
+		mux:    http.NewServeMux(),
 		logins: map[string]*pendingLogin{},
-		usage: NewUsageStore(filepath.Join(cfg.DataDir, "usage.jsonl")),
-		rates: NewRateStore(filepath.Join(cfg.DataDir, "model_rates.json")),
+		usage:  NewUsageStore(filepath.Join(cfg.DataDir, "usage.jsonl")),
 	}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
@@ -101,6 +99,7 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("DELETE /admin/api/accounts/{uid}", h.withAdminAuth(h.adminDeleteAccount))
 	h.mux.HandleFunc("PATCH /admin/api/accounts/{uid}", h.withAdminAuth(h.adminPatchAccount))
 	h.mux.HandleFunc("POST /admin/api/accounts/{uid}/refresh", h.withAdminAuth(h.adminRefreshAccount))
+	h.mux.HandleFunc("POST /admin/api/accounts/{uid}/proxy_test", h.withAdminAuth(h.adminProxyTest))
 	h.mux.HandleFunc("GET /admin/api/accounts/{uid}/json", h.adminAccountJSON)
 	// Web 登录闭环
 	h.mux.HandleFunc("POST /admin/api/login", h.withAdminAuth(h.adminLoginStart))
@@ -113,10 +112,9 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("POST /admin/api/checkin_all", h.withAdminAuth(h.adminCheckinAll))
 	h.mux.HandleFunc("POST /admin/api/refresh_all", h.withAdminAuth(h.adminRefreshAll))
 	h.mux.HandleFunc("POST /admin/api/accounts/{uid}/checkin", h.withAdminAuth(h.adminCheckinOne))
-	// 使用日志 + 模型倍率
+	// 使用日志 + 官方模型倍率
 	h.mux.HandleFunc("GET /admin/api/usage", h.adminUsage)
 	h.mux.HandleFunc("GET /admin/api/rates", h.adminRatesGet)
-	h.mux.HandleFunc("PUT /admin/api/rates", h.withAdminAuth(h.adminRatesPut))
 	return h
 }
 
@@ -343,6 +341,20 @@ func (h *Handler) fetchDynamicModels() []upstream.ModelInfo {
 	return infos
 }
 
+// modelRate 返回模型的官方消耗倍率（get_detail_param 的 consumption_rate）；
+// 上游未下发（0）或模型未知时返回 1。查不到会尝试刷新一次模型缓存。
+func (h *Handler) modelRate(model string) float64 {
+	for _, mi := range h.fetchDynamicModels() {
+		if mi.ID == model {
+			if mi.Rate > 0 {
+				return mi.Rate
+			}
+			return 1
+		}
+	}
+	return 1
+}
+
 // ---------------------------------------------------------------------------
 // chat
 // ---------------------------------------------------------------------------
@@ -384,9 +396,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	body = setModelInBody(body, configName)
 
-	// 使用日志：每笔请求一条（成功/失败都记），倍率 → 估算消耗
+	// 使用日志：每笔请求一条（成功/失败都记），官方倍率 → 相对消耗
 	start := time.Now()
-	rate := h.rates.Get(configName)
+	rate := h.modelRate(configName)
 	var recUID string
 	var recUsage map[string]any
 	record := func(status, errMsg string) {

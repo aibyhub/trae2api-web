@@ -13,8 +13,10 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"trae2api-web/internal/auth"
 	"trae2api-web/internal/upstream"
@@ -36,6 +38,7 @@ type accountSummary struct {
 	ExpiredSoon  bool   `json:"expired_soon,omitempty"`
 	MachineID    string `json:"machine_id,omitempty"` // 前 8 位（脱敏）
 	DeviceID     string `json:"device_id,omitempty"`  // 前 8 位（脱敏）
+	Proxy        string `json:"proxy,omitempty"`      // 出口代理（userinfo 脱敏），空 = 直连/全局兜底
 	HasAuth      bool   `json:"has_auth"`
 }
 
@@ -62,6 +65,7 @@ func (h *Handler) adminAccounts(w http.ResponseWriter, r *http.Request) {
 			}
 			sum.MachineID = prefix(a.MachineID, 8)
 			sum.DeviceID = prefix(a.DeviceID, 8)
+			sum.Proxy = maskProxy(a.ProxyURL)
 		}
 		out = append(out, sum)
 	}
@@ -79,6 +83,7 @@ type importRequest struct {
 	// 可选覆盖字段（导入扁平 JSON 手建场景补 machine/device）
 	MachineID string `json:"machine_id,omitempty"`
 	DeviceID  string `json:"device_id,omitempty"`
+	ProxyURL  string `json:"proxy_url,omitempty"` // 本账号独立出口代理（http/https/socks5）
 }
 
 // importResult 导入结果。
@@ -236,6 +241,12 @@ func (h *Handler) importFromJSON(req importRequest) (*auth.Auth, error) {
 		}
 		a.DeviceID = req.DeviceID
 	}
+	if req.ProxyURL != "" {
+		if !validProxyURL(strings.TrimSpace(req.ProxyURL)) {
+			return nil, fmt.Errorf("proxy_url 需为 http/https/socks5 代理地址")
+		}
+		a.ProxyURL = strings.TrimSpace(req.ProxyURL)
+	}
 	// 缺省 host/domain 补默认
 	if a.Domain == "" {
 		a.Domain = "trae.cn"
@@ -288,6 +299,7 @@ func (h *Handler) adminDeleteAccount(w http.ResponseWriter, r *http.Request) {
 type patchRequest struct {
 	Enabled  *bool   `json:"enabled,omitempty"`
 	Nickname *string `json:"nickname,omitempty"`
+	ProxyURL *string `json:"proxy_url,omitempty"` // "" = 清除（直连/全局兜底）
 }
 
 // adminPatchAccount PATCH /admin/api/accounts/{uid}：软开关 / nickname。
@@ -326,8 +338,82 @@ func (h *Handler) adminPatchAccount(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = a.SaveAtomic()
 	}
+	if req.ProxyURL != nil {
+		p := strings.TrimSpace(*req.ProxyURL)
+		if p != "" && !validProxyURL(p) {
+			writeOpenAIError(w, http.StatusBadRequest, "invalid_request",
+				"proxy_url 需为 http/https/socks5 代理地址，如 socks5://user:pass@1.2.3.4:1080")
+			return
+		}
+		a := h.cfg.Pool.AuthByUID(uid)
+		if a == nil {
+			writeOpenAIError(w, http.StatusNotFound, "not_found", "no auth for uid")
+			return
+		}
+		a.ProxyURL = p
+		if a.FilePath == "" {
+			a.FilePath = auth.FilePathFor(h.cfg.AuthDir, uid)
+		}
+		if err := a.SaveAtomic(); err != nil {
+			writeOpenAIError(w, http.StatusInternalServerError, "save_failed", err.Error())
+			return
+		}
+		log.Printf("proxy updated uid=%s -> %s", uid, maskProxy(p))
+	}
 	st2, _ := h.cfg.Pool.Status(uid)
 	writeJSON(w, http.StatusOK, st2)
+}
+
+// validProxyURL 校验代理地址 scheme。
+func validProxyURL(s string) bool {
+	u, err := url.Parse(s)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	switch u.Scheme {
+	case "http", "https", "socks5", "socks5h":
+		return true
+	}
+	return false
+}
+
+// maskProxy 代理地址脱敏：隐藏 userinfo 凭据（scheme://***@host:port）。
+func maskProxy(s string) string {
+	if s == "" {
+		return ""
+	}
+	u, err := url.Parse(s)
+	if err != nil {
+		return "(unparsable)"
+	}
+	if u.User != nil {
+		return u.Scheme + "://***@" + u.Host
+	}
+	return u.Scheme + "://" + u.Host
+}
+
+// adminProxyTest POST /admin/api/accounts/{uid}/proxy_test：用该账号当前
+// 代理出口实调一次额度接口，验证代理可用性与延迟。
+func (h *Handler) adminProxyTest(w http.ResponseWriter, r *http.Request) {
+	uid := r.PathValue("uid")
+	a := h.cfg.Pool.AuthByUID(uid)
+	if a == nil {
+		writeOpenAIError(w, http.StatusNotFound, "not_found", "no auth for uid")
+		return
+	}
+	start := time.Now()
+	packs, remain, _, _, err := h.cfg.Upstream.EntUsageDetail(a)
+	lat := time.Since(start).Milliseconds()
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"ok": false, "proxy": maskProxy(a.ProxyURL), "latency_ms": lat, "error": err.Error(),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "proxy": maskProxy(a.ProxyURL), "latency_ms": lat,
+		"remain": remain, "packs": len(packs),
+	})
 }
 
 // adminRefreshAccount POST /admin/api/accounts/{uid}/refresh：手动 ExchangeToken + 落盘。

@@ -60,23 +60,3 @@ func TestParseTokenUsage(t *testing.T) {
 	}
 }
 
-func TestRateStore(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "model_rates.json")
-	r := NewRateStore(path)
-	if r.Get("glm-5.2") != 1 {
-		t.Fatal("default rate should be 1")
-	}
-	if err := r.Set(map[string]float64{"glm-5.2": 2.5, "kimi-k3": 0.5}); err != nil {
-		t.Fatal(err)
-	}
-	if r.Get("glm-5.2") != 2.5 || r.Get("kimi-k3") != 0.5 || r.Get("unknown") != 1 {
-		t.Fatal("rates not applied")
-	}
-	r2 := NewRateStore(path) // 重新加载
-	if r2.Get("glm-5.2") != 2.5 {
-		t.Fatal("rates not persisted")
-	}
-	if err := r2.Set(map[string]float64{"bad": -1}); err == nil {
-		t.Fatal("negative rate should be rejected")
-	}
-}

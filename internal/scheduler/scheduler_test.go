@@ -187,3 +187,17 @@ func TestRunRefreshSessionDeadDisables(t *testing.T) {
 		t.Errorf("should disable session-dead account: %+v", st)
 	}
 }
+
+// TestJitterDurationBounded 抖动时长必须落在 [0, window)。
+func TestJitterDurationBounded(t *testing.T) {
+	window := 60 * time.Minute
+	for i := 0; i < 200; i++ {
+		d := jitterDuration(window)
+		if d < 0 || d >= window {
+			t.Fatalf("jitter %v out of [0,%v)", d, window)
+		}
+	}
+	if jitterDuration(0) != 0 {
+		t.Fatal("zero window should yield 0")
+	}
+}

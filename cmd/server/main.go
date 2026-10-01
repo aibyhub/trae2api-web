@@ -66,11 +66,12 @@ func main() {
 	}
 
 	sch := scheduler.New(scheduler.Config{
-		Pool:         p,
-		Upstream:     up,
-		CheckinHour:  cfg.Schedule.CheckinHour,
-		RefreshHours: cfg.Schedule.RefreshHours,
-		RefreshSkew:  24 * time.Hour,
+		Pool:          p,
+		Upstream:      up,
+		CheckinHour:   cfg.Schedule.CheckinHour,
+		RefreshHours:  cfg.Schedule.RefreshHours,
+		JitterMinutes: cfg.Schedule.JitterMinutes,
+		RefreshSkew:   24 * time.Hour,
 	})
 
 	h := server.NewHandler(server.Config{
