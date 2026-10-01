@@ -299,6 +299,7 @@ function renderAccounts(accts){
     else badges += badge('正常','b-ok');
     if(a.expired_soon) badges += badge('token将过期','b-warn');
     const exp = a.expires_at ? new Date(a.expires_at*1000).toLocaleString() : '-';
+    const creditExp = a.credit_expire_at ? new Date(a.credit_expire_at*1000).toLocaleDateString() : '-';
     const toggleChecked = a.enabled && !a.disabled ? 'checked' : '';
     const toggleDisabled = a.disabled ? 'disabled' : '';
     return '<tr>'
@@ -306,6 +307,7 @@ function renderAccounts(accts){
       + '<div class="uid mono">'+esc(a.uid)+'</div></td>'
       + '<td>'+badges+(a.reason?'<div class="mono" style="margin-top:4px">'+esc(a.reason)+'</div>':'')+'</td>'
       + '<td class="mono num">'+fmt(a.credits)+'</td>'
+      + '<td class="mono">'+esc(creditExp)+'</td>'
       + '<td class="mono">'+esc(exp)+'</td>'
       + '<td class="mono">'+esc(a.machine_id||'-')+' / '+esc(a.device_id||'-')+'</td>'
       + '<td><div class="row-actions">'
@@ -319,7 +321,7 @@ function renderAccounts(accts){
       + '</tr>';
   }).join('');
   el.innerHTML = '<div class="tblwrap"><table class="accts"><thead><tr>'
-    + '<th>账号</th><th>状态</th><th style="text-align:right">积分</th><th>Token 有效期</th><th>机器/设备(前8)</th><th style="text-align:right">操作</th>'
+    + '<th>账号</th><th>状态</th><th style="text-align:right">积分</th><th>积分过期</th><th>Token 有效期</th><th>机器/设备(前8)</th><th style="text-align:right">操作</th>'
     + '</tr></thead><tbody>'+rows+'</tbody></table></div>';
 }
 async function toggleAcct(uid, enabled){

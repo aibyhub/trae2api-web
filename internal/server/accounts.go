@@ -36,9 +36,10 @@ type accountSummary struct {
 	// Token 有效期（Unix 秒）与是否临近过期
 	ExpiresAt    int64  `json:"expires_at,omitempty"`
 	ExpiredSoon  bool   `json:"expired_soon,omitempty"`
-	MachineID    string `json:"machine_id,omitempty"` // 前 8 位（脱敏）
-	DeviceID     string `json:"device_id,omitempty"`  // 前 8 位（脱敏）
-	Proxy        string `json:"proxy,omitempty"`      // 出口代理（userinfo 脱敏），空 = 直连/全局兜底
+	ExpireAt     int64  `json:"credit_expire_at,omitempty"` // 最近仍有余量的权益包过期时刻（unix 秒）；0 = 未知
+	MachineID    string `json:"machine_id,omitempty"`       // 前 8 位（脱敏）
+	DeviceID     string `json:"device_id,omitempty"`        // 前 8 位（脱敏）
+	Proxy        string `json:"proxy,omitempty"`            // 出口代理（userinfo 脱敏），空 = 直连/全局兜底
 	HasAuth      bool   `json:"has_auth"`
 }
 
@@ -57,6 +58,7 @@ func (h *Handler) adminAccounts(w http.ResponseWriter, r *http.Request) {
 			Credits:   s.Credits,
 			ErrCount:  s.ErrCount,
 		}
+		sum.ExpireAt = s.ExpireAt // 积分包最近过期时刻（选号「先过期优先」的依据）
 		if a := h.cfg.Pool.AuthByUID(s.UID); a != nil {
 			sum.HasAuth = true
 			sum.ExpiresAt = a.ExpiresAt
