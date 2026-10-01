@@ -1,4 +1,4 @@
-﻿// main.go trae2api-web 入口：加载配置 → 构建 pool → 起 HTTP 服务。
+// main.go trae2api-web 入口：加载配置 → 构建 pool → 起 HTTP 服务。
 package main
 
 import (
@@ -91,7 +91,13 @@ func main() {
 		ErrCooldown:  cfg.ErrCooldownDur,
 		DefaultModel: cfg.DefaultModel,
 		Sched:        sch, // /admin 手动签到/刷新按钮的执行体
+
+		CallbackBase: cfg.CallbackBase, // 空 = 回调仍用 127.0.0.1:<port>
 	})
+
+	// 启动后异步自检代理池：出口 IP / 延迟 / 状态写回 data/proxies.json，面板直接可见。
+	// 只探测，不影响任何账号状态。
+	go h.ProbeAllProxies()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

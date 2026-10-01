@@ -228,9 +228,13 @@
       </div>
       <span id="pxStatus" class="status-line" style="display:none"></span>
     </div>
+    <div class="panel" style="display:flex;justify-content:space-between;align-items:center;gap:10px">
+      <h2 style="margin:0">代理池</h2>
+      <button class="btn" onclick="testAllProxies()">全部检测（出口 IP / 延迟）</button>
+    </div>
     <div id="proxyPoolTable" class="tblwrap"><div class="muted" style="padding:14px"><span class="spin"></span> 加载中...</div></div>
     <div class="panel" style="margin-top:14px">
-      <span class="muted">说明：账号在「代理」弹窗里从池中选择出口；<b>导入新账号时若未指定出口，自动均衡分配</b>占用最少的代理。凭据仅存服务器 data/proxies.json，面板不回显明文。建议不同账号使用不同出口 IP。</span>
+      <span class="muted">说明：账号在「代理」弹窗里从池中选择出口；<b>导入新账号（含粘贴回调链接、网页登录）若未指定出口，自动均衡分配</b>占用最少的代理；重新导入/重登同一账号会<b>保留原有出口</b>。凭据仅存服务器 data/proxies.json，面板不回显明文。建议不同账号使用不同出口 IP（「全部检测」可看每个出口的真实 IP）。</span>
     </div>
   </div>
 </div>
@@ -308,6 +312,18 @@ async function loadAccounts(){
     document.getElementById('acctTable').innerHTML = '<div style="color:var(--bad);padding:14px">加载失败：'+esc(e.message)+'（服务是否在运行？）</div>';
   }
 }
+/* 出口代理单元格：池内名称优先，其次脱敏地址，空 = 直连 */
+function pxCell(a){
+  if(a.proxy_name) return '<b>'+esc(a.proxy_name)+'</b>'+(a.proxy?'<div class="mono" style="margin-top:4px">'+esc(a.proxy)+'</div>':'');
+  if(a.proxy) return '<span class="mono">'+esc(a.proxy)+'</span>';
+  return '<span class="muted">直连</span>';
+}
+/* 最近签到摘要（一眼看出哪个号今天没签/失败） */
+function ckText(a){
+  if(!a.last_checkin_at) return '';
+  const m={claimed:'已签到',already:'今日已签',checkin_off:'上游未开放',error:'失败',skipped:'跳过'};
+  return '最近签到 '+new Date(a.last_checkin_at*1000).toLocaleString()+'（'+(m[a.last_checkin_status]||a.last_checkin_status||'-')+'）';
+}
 function renderAccounts(accts){
   window._lastAccounts = accts;
   const el = document.getElementById('acctTable');
@@ -322,6 +338,7 @@ function renderAccounts(accts){
     else if(a.cooling) badges += badge('冷却','b-warn');
     else badges += badge('正常','b-ok');
     if(a.expired_soon) badges += badge('token将过期','b-warn');
+    if(a.transport_down) badges += badge('出口异常','b-bad');
     const exp = a.expires_at ? new Date(a.expires_at*1000).toLocaleString() : '-';
     const creditExp = a.credit_expire_at ? new Date(a.credit_expire_at*1000).toLocaleDateString() : '-';
     const toggleChecked = a.enabled && !a.disabled ? 'checked' : '';
@@ -329,11 +346,12 @@ function renderAccounts(accts){
     return '<tr>'
       + '<td><div class="nick">'+esc(a.nickname||'(未命名)')+'</div>'
       + '<div class="uid mono">'+esc(a.uid)+'</div></td>'
-      + '<td>'+badges+(a.reason?'<div class="mono" style="margin-top:4px">'+esc(a.reason)+'</div>':'')+'</td>'
+      + '<td>'+badges+(a.reason?'<div class="mono" style="margin-top:4px">'+esc(a.reason)+'</div>':'')+(ckText(a)?'<div class="mono" style="margin-top:4px">'+esc(ckText(a))+'</div>':'')+'</td>'
       + '<td class="mono num">'+fmt(a.credits)+'</td>'
       + '<td class="mono">'+esc(creditExp)+'</td>'
       + '<td class="mono">'+esc(exp)+'</td>'
       + '<td class="mono">'+esc(a.machine_id||'-')+' / '+esc(a.device_id||'-')+'</td>'
+      + '<td>'+pxCell(a)+'</td>'
       + '<td><div class="row-actions">'
       + '<label class="toggle"><input type="checkbox" '+toggleChecked+' '+toggleDisabled+' onchange="toggleAcct(\''+esc(a.uid)+'\', this.checked)"><span class="slider"></span></label>'
       + '<button class="btn sm" onclick="checkinAcct(\''+esc(a.uid)+'\')">签到</button>'
@@ -346,7 +364,7 @@ function renderAccounts(accts){
       + '</tr>';
   }).join('');
   el.innerHTML = '<div class="tblwrap"><table class="accts"><thead><tr>'
-    + '<th>账号</th><th>状态</th><th style="text-align:right">积分</th><th>积分过期</th><th>Token 有效期</th><th>机器/设备(前8)</th><th style="text-align:right">操作</th>'
+    + '<th>账号</th><th>状态</th><th style="text-align:right">积分</th><th>积分过期</th><th>Token 有效期</th><th>机器/设备(前8)</th><th>出口代理</th><th style="text-align:right">操作</th>'
     + '</tr></thead><tbody>'+rows+'</tbody></table></div>';
 }
 async function toggleAcct(uid, enabled){
@@ -718,7 +736,7 @@ async function showProxy(uid){
   const cur = a.proxy || '';
   const matched = pool.find(p=>p.url_masked === cur);
   const options = '<option value="">直连（不使用代理）</option>'
-    + pool.map(p=>'<option value="'+esc(p.name)+'"'+(matched&&matched.name===p.name?' selected':'')+'>'+esc(p.name)+'（'+esc(p.url_masked)+'）</option>').join('');
+    + pool.map(p=>'<option value="'+esc(p.name)+'"'+(matched&&matched.name===p.name?' selected':'')+'>'+esc(p.name)+'（'+esc(p.url_masked)+(p.last_exit_ip?' · 出口 '+esc(p.last_exit_ip):'')+'）</option>').join('');
   showModal('出口代理 — '+(a.nickname||uid),
     '<div class="muted" style="margin-bottom:10px">从代理池选择该账号的出口 IP（不同账号选不同代理，降低风控关联）。新代理在「代理池」页添加。当前出口：<b>'+(cur?esc(cur):'直连')+'</b></div>'
     + '<select id="proxySel" class="imp" style="min-height:0;padding:8px 10px" onchange="document.getElementById(\'proxyCustomWrap\').style.display=this.value===\'__custom__\'?\'\':\'none\'">'
@@ -760,17 +778,32 @@ async function testProxy(uid){
 }
 
 /* ─── 代理池 ─── */
+function pxHealth(p){
+  if(!p.checked_at) return '<span class="muted">未检测</span>';
+  const t = new Date(p.checked_at*1000).toLocaleString();
+  return badge(p.last_ok?'可用':'异常', p.last_ok?'b-ok':'b-bad')
+    + '<div class="mono" style="margin-top:4px">'+(p.last_latency_ms||0)+'ms · '+esc(t)+'</div>';
+}
+function renderProxies(list){
+  list = list || [];
+  document.getElementById('proxyPoolTable').innerHTML = !list.length
+    ? '<div class="muted" style="padding:14px">代理池为空 —— 在上方添加代理后，账号即可从下拉里选用。</div>'
+    : '<table class="accts"><thead><tr><th>名称</th><th>地址</th><th style="text-align:right">账号数</th><th>出口 IP</th><th>健康</th><th style="text-align:right">操作</th></tr></thead><tbody>'
+      + list.map(p=>'<tr><td class="nick">'+esc(p.name)+'</td><td class="mono">'+esc(p.url_masked)+'</td>'
+        + '<td class="mono num" style="text-align:right">'+fmt(p.accounts)+'</td>'
+        + '<td class="mono">'+esc(p.last_exit_ip||'-')+'</td>'
+        + '<td>'+pxHealth(p)+'</td>'
+        + '<td><div class="row-actions">'
+        + '<button class="btn sm" onclick="testPoolProxy(\''+esc(p.name)+'\')">检测</button>'
+        + '<button class="btn sm" onclick="editProxy(\''+esc(p.name)+'\')">编辑</button>'
+        + '<button class="btn sm danger" onclick="deleteProxy(\''+esc(p.name)+'\')">删除</button>'
+        + '</div></td></tr>').join('')
+      + '</tbody></table>';
+}
 async function loadProxies(){
   try{
     const d = await fetch('/admin/api/proxies', {headers: authHeader(), cache:'no-store'}).then(r=>r.json());
-    const list = d.proxies || [];
-    document.getElementById('proxyPoolTable').innerHTML = !list.length
-      ? '<div class="muted" style="padding:14px">代理池为空 —— 在上方添加代理后，账号即可从下拉里选用。</div>'
-      : '<table class="accts"><thead><tr><th>名称</th><th>地址</th><th style="text-align:right">操作</th></tr></thead><tbody>'
-        + list.map(p=>'<tr><td class="nick">'+esc(p.name)+'</td><td class="mono">'+esc(p.url_masked)+'</td>'
-          + '<td><div class="row-actions"><button class="btn sm" onclick="testPoolProxy(\''+esc(p.name)+'\',\''+esc(p.url_masked)+'\')">测试</button>'
-          + '<button class="btn sm danger" onclick="deleteProxy(\''+esc(p.name)+'\')">删除</button></div></td></tr>').join('')
-        + '</tbody></table>';
+    renderProxies(d.proxies);
   }catch(e){
     document.getElementById('proxyPoolTable').innerHTML = '<div style="color:var(--bad);padding:14px">加载失败（需要 API Key）：'+esc(e.message)+'</div>';
   }
@@ -813,13 +846,49 @@ async function testPoolProxyForm(){
   }catch(e){ pxStatus('err','测试失败：'+e.message); }
 }
 async function testPoolProxy(name){
-  pxStatus('','测试中：'+name+' ...');
+  pxStatus('','检测中：'+name+' ...');
   try{
     const r = await fetch('/admin/api/proxies/test', {method:'POST', headers:{'Content-Type':'application/json', ...authHeader()}, body: JSON.stringify({name})});
     const d = await r.json();
-    if(d.ok){ pxStatus('ok','连通正常：'+name+' — HTTP '+d.status+'，'+d.latency_ms+'ms'); }
+    if(d.ok){ pxStatus('ok','连通正常：'+name+' — 出口 IP '+(d.exit_ip||'?')+'，HTTP '+d.status+'，'+d.latency_ms+'ms'); }
     else { pxStatus('err','失败：'+name+' — '+(d.error||('HTTP '+d.status))+'，'+(d.latency_ms||'?')+'ms'); }
-  }catch(e){ pxStatus('err','测试失败：'+e.message); }
+    loadProxies();
+  }catch(e){ pxStatus('err','检测失败：'+e.message); }
+}
+async function testAllProxies(){
+  pxStatus('','检测中（并发探测全部代理，几秒）...');
+  try{
+    const r = await fetch('/admin/api/proxies/test_all', {method:'POST', headers: authHeader()});
+    const d = await r.json();
+    if(!r.ok){ pxStatus('err','检测失败：'+apiErr(d)); return; }
+    const list = d.proxies||[];
+    const okN = list.filter(p=>p.last_ok).length;
+    pxStatus(okN===list.length?'ok':'err','检测完成：'+okN+'/'+list.length+' 可用（出口 IP 见表格）');
+    renderProxies(list);
+  }catch(e){ pxStatus('err','检测失败：'+e.message); }
+}
+function editProxy(name){
+  showModal('编辑代理 — '+name,
+    '<div class="muted" style="margin-bottom:10px">改名称或地址。地址变了可勾选「同步更新引用此代理的账号」，否则那些账号仍指向旧地址。</div>'
+    + '<input id="pxEditName" class="imp" style="min-height:0;padding:8px 10px" value="'+esc(name)+'" placeholder="名称">'
+    + '<input id="pxEditURL" class="imp" style="min-height:0;padding:8px 10px;margin-top:8px" placeholder="新地址（留空则不改），如 socks5h://user:pass@1.2.3.4:1080">'
+    + '<label class="muted" style="display:flex;align-items:center;gap:6px;margin-top:10px"><input type="checkbox" id="pxEditAccounts" checked> 同步更新引用此代理的账号</label>'
+    + '<div class="imp-row" style="margin-top:12px"><button class="btn primary" onclick="saveProxyEdit(\''+esc(name)+'\')">保存</button>'
+    + '<span id="pxEditStatus" class="status-line" style="display:none;margin:0"></span></div>');
+}
+async function saveProxyEdit(name){
+  const nn = document.getElementById('pxEditName').value.trim();
+  const nu = document.getElementById('pxEditURL').value.trim();
+  const also = document.getElementById('pxEditAccounts').checked;
+  const st = document.getElementById('pxEditStatus');
+  st.style.display=''; st.className='status-line'; st.textContent='保存中...';
+  try{
+    const r = await fetch('/admin/api/proxies/'+encodeURIComponent(name), {method:'PUT', headers:{'Content-Type':'application/json', ...authHeader()}, body: JSON.stringify({name:nn, url:nu, also_accounts:also})});
+    const d = await r.json();
+    if(!r.ok){ st.className='status-line err'; st.textContent='保存失败：'+apiErr(d); return; }
+    st.className='status-line ok'; st.textContent='已保存';
+    loadProxies(); loadAccounts();
+  }catch(e){ st.className='status-line err'; st.textContent='保存失败：'+e.message; }
 }
 /* ─── 设备重注册（修复 claim 9074「设备未注册」） ─── */
 async function registerDevice(uid){

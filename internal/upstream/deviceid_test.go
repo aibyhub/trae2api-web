@@ -2,7 +2,9 @@
 package upstream
 
 import (
+	"errors"
 	"net/http"
+	"net/url"
 	"testing"
 
 	"trae2api-web/internal/auth"
@@ -33,13 +35,13 @@ func TestIsDecimalDeviceID(t *testing.T) {
 		in   string
 		want bool
 	}{
-		{"4003784254113003", true},  // 真机 aha 设备号（16 位）
-		{"3187245960124379", true},  // 16 位
-		{"123456789012", true},      // 下限 12 位
-		{"12345678901234567890", true}, // 上限 20 位
+		{"4003784254113003", true},                  // 真机 aha 设备号（16 位）
+		{"3187245960124379", true},                  // 16 位
+		{"123456789012", true},                      // 下限 12 位
+		{"12345678901234567890", true},              // 上限 20 位
 		{"24499c08d1a80d56921b532d94ca02c7", false}, // 旧 hex32 → 9074
-		{"12345678901", false},      // 11 位
-		{"123456789012345678901", false}, // 21 位
+		{"12345678901", false},                      // 11 位
+		{"123456789012345678901", false},            // 21 位
 		{"", false},
 	}
 	for _, c := range cases {
@@ -80,6 +82,50 @@ func TestClientForProxy(t *testing.T) {
 	badStd, _ := c.clientFor(a)
 	if badStd != c.HTTP {
 		t.Fatal("invalid proxy should fall back to default")
+	}
+
+	// socks5h 必须被接受（与校验层同一套规则），不得静默回退直连。
+	a.ProxyURL = "socks5h://127.0.0.1:1080"
+	p3Std, _ := c.clientFor(a)
+	if p3Std == c.HTTP {
+		t.Fatal("socks5h must be accepted as a proxy, not silently fall back to direct")
+	}
+}
+
+// TestValidProxyScheme 校验层与传输层必须共用同一套 scheme 规则。
+func TestValidProxyScheme(t *testing.T) {
+	ok := []string{"http", "https", "socks5", "socks5h"}
+	bad := []string{"", "socks4", "ftp", "file", "SOCKS5x"}
+	for _, s := range ok {
+		if !ValidProxyScheme(s) {
+			t.Errorf("ValidProxyScheme(%q)=false want true", s)
+		}
+	}
+	for _, s := range bad {
+		if ValidProxyScheme(s) {
+			t.Errorf("ValidProxyScheme(%q)=true want false", s)
+		}
+	}
+}
+
+// TestIsTransportError 出口/网络故障不应被当成账号错误惩罚。
+func TestIsTransportError(t *testing.T) {
+	transport := []error{
+		&url.Error{Op: "Post", URL: "https://api.trae.cn/x", Err: errors.New("net/http: HTTP/1.x transport connection broken: malformed HTTP response \"\\x00\\x00\\x12\\x04\"")},
+		&url.Error{Op: "Post", URL: "https://api.trae.cn/x", Err: errors.New("proxyconnect tcp: dial tcp 10.0.0.1:10529: connect: connection refused")},
+		errors.New("socks connect tcp 10.0.0.1:1080->api.trae.cn:443: connection reset by peer"),
+	}
+	for _, e := range transport {
+		if !IsTransportError(e) {
+			t.Errorf("IsTransportError(%v)=false want true", e)
+		}
+	}
+	upstreamErr := &Error{Kind: ErrSoftRate, Status: 429, Msg: "too many requests"}
+	if IsTransportError(upstreamErr) {
+		t.Error("upstream HTTP error must not be treated as a transport error")
+	}
+	if IsTransportError(nil) {
+		t.Error("nil must not be a transport error")
 	}
 }
 

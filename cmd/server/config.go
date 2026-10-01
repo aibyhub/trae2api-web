@@ -13,12 +13,13 @@ import (
 
 // Config 顶层配置。
 type Config struct {
-	Listen        string `json:"listen"`         // ":7864"
-	CallbackPort  string `json:"callback_port"`  // "18080"（TRAE 登录回调监听端口，0 = 不起）
-	APIKey        string `json:"-"`              // 只读 env TW2A_API_KEY（不读 json）
-	AuthDir       string `json:"auth_dir"`       // "./auths"
-	StateFile     string `json:"state_file"`     // "./data/state.json"
-	DefaultModel  string `json:"default_model"`  // "glm-5.2"
+	Listen       string `json:"listen"`        // ":7864"
+	CallbackPort string `json:"callback_port"` // "18080"（TRAE 登录回调监听端口，0 = 不起）
+	CallbackBase string `json:"callback_base"` // 登录回调 base URL（远程部署用，如 http://1.2.3.4:18080）；空 = 127.0.0.1:<port>
+	APIKey       string `json:"-"`             // 只读 env TW2A_API_KEY（不读 json）
+	AuthDir      string `json:"auth_dir"`      // "./auths"
+	StateFile    string `json:"state_file"`    // "./data/state.json"
+	DefaultModel string `json:"default_model"` // "glm-5.2"
 
 	Cooldown struct {
 		PlanCredit  string `json:"plan_credit"`   // "12h"
@@ -28,11 +29,11 @@ type Config struct {
 	} `json:"cooldown"`
 
 	Schedule struct {
-		CheckinHour    int    `json:"checkin_hour"`           // 旧字段（单时点），被 checkin_hours 取代
-		CheckinHours   []int  `json:"checkin_hours"`          // 签到时点列表，默认 [9]；多时点=失败重试窗口
-		RefreshHours   []int  `json:"refresh_hours"`          // [3]
-		JitterMinutes  int    `json:"checkin_jitter_minutes"` // 签到随机延迟窗口（分钟），默认 60，负数关闭
-		BalanceRefreshMin int `json:"balance_refresh_minutes"` // 余额后台刷新间隔，默认 30，0 关闭
+		CheckinHour       int   `json:"checkin_hour"`            // 旧字段（单时点），被 checkin_hours 取代
+		CheckinHours      []int `json:"checkin_hours"`           // 签到时点列表，默认 [9]；多时点=失败重试窗口
+		RefreshHours      []int `json:"refresh_hours"`           // [3]
+		JitterMinutes     int   `json:"checkin_jitter_minutes"`  // 签到随机延迟窗口（分钟），默认 60，负数关闭
+		BalanceRefreshMin int   `json:"balance_refresh_minutes"` // 余额后台刷新间隔，默认 30，0 关闭
 	} `json:"schedule"`
 
 	Upstream struct {
@@ -99,6 +100,9 @@ func applyEnv(c *Config) {
 	}
 	if v := os.Getenv("TW2A_CALLBACK_PORT"); v != "" {
 		c.CallbackPort = v
+	}
+	if v := os.Getenv("TW2A_CALLBACK_BASE"); v != "" {
+		c.CallbackBase = v
 	}
 	if v := os.Getenv("TW2A_AUTH_DIR"); v != "" {
 		c.AuthDir = v

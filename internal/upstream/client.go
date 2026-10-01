@@ -6,9 +6,11 @@ import (
 	"bytes"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -174,8 +176,10 @@ func (c *Client) clientFor(a *auth.Auth) (std, stream *http.Client) {
 		return p.std, p.stream
 	}
 	u, err := url.Parse(proxy)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https" && u.Scheme != "socks5") {
-		log.Printf("proxy config invalid (%q) — fallback to direct", proxy)
+	if err != nil || !ValidProxyScheme(u.Scheme) {
+		// 回退直连 = 真实出口 IP 不再是该账号配置的代理，务必留证。
+		// 校验层（server.validProxyURL）与本处共用 ValidProxyScheme，正常不该走到这里。
+		log.Printf("proxy config invalid (%q, scheme=%q) — fallback to DIRECT", proxy, u.Scheme)
 		p := &proxyPair{std: std, stream: stream}
 		c.proxyClients.Store(proxy, p)
 		return p.std, p.stream
@@ -213,6 +217,95 @@ func (c *Client) clientFor(a *auth.Auth) (std, stream *http.Client) {
 	}
 	c.proxyClients.Store(proxy, p)
 	return p.std, p.stream
+}
+
+// ValidProxyScheme 报告代理 URL 的 scheme 是否受支持。
+// 单一事实来源：面板/导入的校验（server.validProxyURL）与传输层（clientFor）共用同一套
+// 规则，避免出现「保存成功、实际静默直连」。socks5h 与 socks5 在 Go 内部等价
+// （都走 socks5 拨号、域名交给代理解析），一并接受。
+func ValidProxyScheme(scheme string) bool {
+	switch scheme {
+	case "http", "https", "socks5", "socks5h":
+		return true
+	}
+	return false
+}
+
+// IsTransportError 报告错误是否属于「出口/网络/协议层」故障，而不是上游业务拒绝。
+// 代理不可达、连接被重置、TLS/h2 握手异常、畸形响应、DNS/超时这类问题不该按账号问题
+// 累计 errCount（否则出口抖一下就会把好账号冷却甚至禁用）。
+// 上游返回了 HTTP 响应（*Error）时一律不算传输错误。
+func IsTransportError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var ue *Error
+	if errors.As(err, &ue) { // 上游 HTTP 业务错误（429/401/5xx...）
+		return false
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	// 兜底：TLS/HTTP2/proxy 握手错误不一定实现 net.Error。
+	msg := err.Error()
+	for _, m := range []string{
+		"malformed HTTP response", "http2", "tls:", "proxyconnect",
+		"socks connect", "connection reset", "no such host", "i/o timeout", "EOF",
+	} {
+		if strings.Contains(msg, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// ProxyProbeResult 代理探测结果（面板「测试 / 检测出口 IP」用）。
+type ProxyProbeResult struct {
+	OK        bool   // 出口可用：经代理拿到了公网回显（ipify 2xx 且带回 IP）
+	ExitIP    string // 真实出口 IP（best-effort，失败为空）
+	Status    int    // api.trae.cn 的 HTTP 状态码；0 = 未拿到响应
+	LatencyMs int64  // api.trae.cn 请求耗时
+	Err       error  // api.trae.cn 的传输错误（nil = 拿到响应）
+}
+
+// ProbeProxy 用与真实请求完全相同的客户端构造探测代理出口。
+// 两步：① 经代理解析真实出口 IP（api.ipify.org，2xx 且带回 IP 即证明出口可用）；
+// ② 经代理访问上游 api.trae.cn，记录状态码与延迟（根路径正常返回 404，不能拿 <400 判失败）。
+// 关键：必须走 clientFor（而不是另建一个 http.Transport）——否则「测试通过、真实请求挂」
+// 这类不一致会重演（v1.2.8 之前的 malformed HTTP response 正是这么漏掉的）。
+func (c *Client) ProbeProxy(proxyURL string, timeout time.Duration) ProxyProbeResult {
+	var res ProxyProbeResult
+	if timeout <= 0 {
+		timeout = 12 * time.Second
+	}
+	std, _ := c.clientFor(&auth.Auth{ProxyURL: proxyURL})
+	hc := &http.Client{Timeout: timeout, Transport: std.Transport}
+
+	// ① 出口 IP / 出口可用性
+	if r1, err := hc.Get("https://api.ipify.org"); err == nil {
+		raw, _ := io.ReadAll(io.LimitReader(r1.Body, 64))
+		r1.Body.Close()
+		res.ExitIP = strings.TrimSpace(string(raw))
+		res.OK = r1.StatusCode >= 200 && r1.StatusCode < 300 && res.ExitIP != ""
+	}
+
+	// ② 上游可达性（状态码 + 延迟；4xx 属正常，不做 ok 判定）
+	start := time.Now()
+	resp, err := hc.Get(c.ugBase() + "/")
+	res.LatencyMs = time.Since(start).Milliseconds()
+	if err != nil {
+		res.Err = err
+		return res
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	resp.Body.Close()
+	res.Status = resp.StatusCode
+	return res
 }
 
 // doJSON 发请求并解 JSON；HTTP 非 2xx 时返回带 body 片段的 *Error。
@@ -423,11 +516,11 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 			}
 		}
 		out = append(out, ModelInfo{
-			ID:       cfg.ConfigName,
-			Name:     cfg.DisplayConfig.DisplayName,
-			Rate:     rate,
-			FeeLevel: cfg.DisplayConfig.FeeModelLevel,
-			Custom:   cfg.IsCustomModel,
+			ID:        cfg.ConfigName,
+			Name:      cfg.DisplayConfig.DisplayName,
+			Rate:      rate,
+			FeeLevel:  cfg.DisplayConfig.FeeModelLevel,
+			Custom:    cfg.IsCustomModel,
 			Invisible: cfg.Invisible,
 		})
 	}
@@ -456,12 +549,12 @@ func (c *Client) CheckinStatus(a *auth.Auth) (checkedIn bool, credits int64, ena
 		return false, 0, false, err
 	}
 	var resp struct {
-		Code    int    `json:"code"`
-		Message string `json:"message"`
-		Msg     string `json:"msg"`
-		CheckedIn bool  `json:"checked_in"`
-		Credits   int64 `json:"credits"`
-		Enable    bool  `json:"enable"`
+		Code      int    `json:"code"`
+		Message   string `json:"message"`
+		Msg       string `json:"msg"`
+		CheckedIn bool   `json:"checked_in"`
+		Credits   int64  `json:"credits"`
+		Enable    bool   `json:"enable"`
 		Data      *struct {
 			CheckedIn bool  `json:"checked_in"`
 			Credits   int64 `json:"credits"`
@@ -527,11 +620,11 @@ func (c *Client) UserEntUsage(a *auth.Auth) (remain int64, err error) {
 
 // EntPack 单个权益包明细（面板展示：名称/额度/已用/生效与过期时间）。
 type EntPack struct {
-	Name      string `json:"name"`      // display_desc，如「签到奖励」
-	Group     string `json:"group"`     // group_name，如「每日签到」
+	Name      string `json:"name"`  // display_desc，如「签到奖励」
+	Group     string `json:"group"` // group_name，如「每日签到」
 	Limit     int64  `json:"limit"`
 	Used      int64  `json:"used"`
-	ExpireAt  int64  `json:"expire_at"` // unix 秒；0 = 未知
+	ExpireAt  int64  `json:"expire_at"`  // unix 秒；0 = 未知
 	StartTime int64  `json:"start_time"` // unix 秒：领取/生效时刻（可看到定时任务几点领的分）
 	Status    int    `json:"status"`
 }
@@ -568,11 +661,11 @@ func (c *Client) EntUsageDetail(a *auth.Auth) (packs []EntPack, remain, limit, u
 	}
 	var resp struct {
 		UserEntitlementPackList []struct {
-			DisplayDesc string `json:"display_desc"`
-			GroupName   string `json:"group_name"`
-			ExpireTime  int64  `json:"expire_time"`
-			StartTime   int64  `json:"start_time"`
-			Status      int    `json:"status"`
+			DisplayDesc         string `json:"display_desc"`
+			GroupName           string `json:"group_name"`
+			ExpireTime          int64  `json:"expire_time"`
+			StartTime           int64  `json:"start_time"`
+			Status              int    `json:"status"`
 			EntitlementBaseInfo struct {
 				Quota struct {
 					CreditsLimit int64 `json:"credits_limit"`

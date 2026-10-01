@@ -1,4 +1,4 @@
-﻿// login.go Web 登录闭环：生成登录 URL → pending 态 → /authorize 回调捕获 →
+// login.go Web 登录闭环：生成登录 URL → pending 态 → /authorize 回调捕获 →
 // ExchangeToken + GetUserInfo + 落盘 → 面板轮询 result。
 //
 // 回调端口策略（M0 结论：双端口 18080）：
@@ -63,7 +63,14 @@ func (h *Handler) adminLoginStart(w http.ResponseWriter, r *http.Request) {
 	if req.CallbackPort == "" {
 		req.CallbackPort = "18080"
 	}
-	callbackURL := "http://127.0.0.1:" + req.CallbackPort + "/authorize"
+	// 回调地址：配了 callback_base（远程部署 / 反代 / 已发布 18080 端口）就用它，
+	// 否则沿用旧行为 http://127.0.0.1:<port>/authorize（只在浏览器与服务器同机时可用）。
+	callbackURL := ""
+	if base := strings.TrimRight(strings.TrimSpace(h.cfg.CallbackBase), "/"); base != "" {
+		callbackURL = base + "/authorize"
+	} else {
+		callbackURL = "http://127.0.0.1:" + req.CallbackPort + "/authorize"
+	}
 
 	machineID, err := randomHex(16) // hex32
 	if err != nil {
@@ -190,6 +197,13 @@ func (h *Handler) authorizeCallback(w http.ResponseWriter, r *http.Request) {
 		MachineID:    machineID,
 		DeviceID:     deviceID,
 		ExpiresAt:    info.ExpiresAt,
+	}
+	// 出口代理：保留该账号已有配置（重新登录不得清空），否则从池内自动均衡。
+	// 必须在 ExchangeToken / GetUserInfo 之前确定，保证注册 IP 与后续请求出口一致。
+	if old := h.existingProxy(a.UID); old != "" {
+		a.ProxyURL = old
+	} else {
+		h.autoAssignProxy(a)
 	}
 	// 有 refreshToken → ExchangeToken 换新 access + 轮换 refreshToken
 	if a.RefreshToken != "" {

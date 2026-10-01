@@ -1,4 +1,4 @@
-﻿// Package scheduler 定时任务：每日签到 + token 预刷新。
+// Package scheduler 定时任务：每日签到 + token 预刷新。
 // 签到成功后重新查积分，积分 > 0 的冷却账号自动解冻。
 // 签到时刻在 CheckinHour 后按每账号独立的随机 0~JitterMinutes 延迟执行
 // （每日重掷、账号间互不相同），让上游看到的时间分布更像人操作。
@@ -18,10 +18,10 @@ import (
 
 // Config 调度器依赖。
 type Config struct {
-	Pool           *pool.Pool
-	Upstream       *upstream.Client
-	CheckinHours   []int         // 每日签到时点（小时列表，如 [9,21]），默认 [9]；
-	                              // 多时点 = 失败重试窗口（claim 幂等，不会重复领）
+	Pool         *pool.Pool
+	Upstream     *upstream.Client
+	CheckinHours []int // 每日签到时点（小时列表，如 [9,21]），默认 [9]；
+	// 多时点 = 失败重试窗口（claim 幂等，不会重复领）
 	RefreshHours   []int         // token 预刷新小时，默认 [3]
 	JitterMinutes  int           // 签到随机延迟窗口（分钟），默认 60；负数 = 关闭
 	BalanceRefresh time.Duration // 余额/过期数据后台刷新间隔，默认 30m；0 = 关闭
@@ -230,6 +230,7 @@ func (s *Scheduler) CheckinUID(uid string) Result {
 		s.cfg.Pool.SetExpiry(uid, upstream.SoonestExpiry(packs))
 		s.cfg.Pool.ReenableIfCredits(uid, remain)
 	}
+	s.cfg.Pool.SetCheckin(uid, res.Status)
 	return res
 }
 

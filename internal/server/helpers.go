@@ -1,4 +1,4 @@
-﻿// helpers.go admin 子包共用的小工具。
+// helpers.go admin 子包共用的小工具。
 package server
 
 import (
@@ -6,7 +6,20 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 )
+
+// shortErr 把错误压成一行短文本（日志/面板展示用；上游 body 片段可能很长）。
+func shortErr(err error) string {
+	if err == nil {
+		return ""
+	}
+	s := strings.Join(strings.Fields(err.Error()), " ")
+	if len(s) > 200 {
+		s = s[:200] + "…"
+	}
+	return s
+}
 
 // decodeBodyOptional 读 body（限 1MB）并 JSON 解码到 v；body 为空时返回 nil 不报错。
 // 用于 login start/cancel 等可选 body 的接口。

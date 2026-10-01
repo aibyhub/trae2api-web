@@ -1,4 +1,4 @@
-﻿// Package pool 账号池：内存索引 + 冷却/禁用状态机 + state.json 持久化。
+// Package pool 账号池：内存索引 + 冷却/禁用状态机 + state.json 持久化。
 // 挑选策略：healthy 账号中积分最近过期者优先（用掉快过期的额度），
 // 同过期时间比剩余积分；过期信息未知时退化为积分最多者。
 package pool
@@ -50,6 +50,14 @@ type Status struct {
 	Enabled  bool  `json:"enabled"`
 	ErrCount int   `json:"err_count,omitempty"`
 	ExpireAt int64 `json:"expire_at,omitempty"` // 最近一份仍有余量的权益包过期时刻（unix 秒）；0 = 未知
+
+	// TransportDown = 该账号出口（代理/网络）处于临时隔离窗口（见 NoteTransportError）。
+	// 与账号健康无关：仅表示"现在别用这个出口"，不累计 errCount、不写 state.json。
+	TransportDown     bool      `json:"transport_down,omitempty"`
+	TransportReason   string    `json:"transport_reason,omitempty"`
+	TransportUntil    time.Time `json:"transport_until,omitempty"`
+	LastCheckinAt     int64     `json:"last_checkin_at,omitempty"`     // 最近一次签到结果时间（unix 秒）
+	LastCheckinStatus string    `json:"last_checkin_status,omitempty"` // claimed/already/checkin_off/error...
 }
 
 type entry struct {
@@ -61,6 +69,11 @@ type entry struct {
 	until    time.Time
 	errCount int
 	expireAt int64 // 最近过期包（unix 秒）；0 = 未知
+	// 出口/网络临时隔离（内存态，不落盘）：代理不可达、连接被重置等导致的一次失败。
+	transportUntil  time.Time
+	transportReason string
+	lastCheckinAt   int64  // 最近签到时间（unix 秒）
+	lastCheckin     string // 最近签到结果
 }
 
 func (e *entry) healthy(now time.Time) bool {
@@ -70,17 +83,23 @@ func (e *entry) healthy(now time.Time) bool {
 	if !e.until.IsZero() && now.Before(e.until) {
 		return false
 	}
+	// 出口故障临时隔离：不惩罚账号，但窗口内不参与选号（避免反复选中同一个坏出口）。
+	if !e.transportUntil.IsZero() && now.Before(e.transportUntil) {
+		return false
+	}
 	return true
 }
 
 // stateEntry state.json 单账号持久化条目。
 type stateEntry struct {
-	Credits  int64     `json:"credits"`
-	Disabled bool      `json:"disabled"`
-	Enabled  *bool     `json:"enabled,omitempty"` // 指针：旧文件缺省时按 true 处理，不写回脏值
-	Reason   string    `json:"reason,omitempty"`
-	Until    time.Time `json:"until,omitempty"`
-	ExpireAt int64     `json:"expire_at,omitempty"` // 最近过期包（unix 秒）
+	Credits           int64     `json:"credits"`
+	Disabled          bool      `json:"disabled"`
+	Enabled           *bool     `json:"enabled,omitempty"` // 指针：旧文件缺省时按 true 处理，不写回脏值
+	Reason            string    `json:"reason,omitempty"`
+	Until             time.Time `json:"until,omitempty"`
+	ExpireAt          int64     `json:"expire_at,omitempty"` // 最近过期包（unix 秒）
+	LastCheckinAt     int64     `json:"last_checkin_at,omitempty"`
+	LastCheckinStatus string    `json:"last_checkin_status,omitempty"`
 }
 
 // stateFile 持久化格式。
@@ -289,13 +308,42 @@ func (p *Pool) NoteError(uid string, threshold int, d time.Duration) {
 	p.saveLocked()
 }
 
-// NoteSuccess 成功请求重置错误计数。
+// NoteSuccess 成功请求重置错误计数，并清除出口故障隔离。
 func (p *Pool) NoteSuccess(uid string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
 		e.errCount = 0
+		e.transportUntil = time.Time{}
+		e.transportReason = ""
 	}
+}
+
+// NoteTransportError 记录一次「出口/网络故障」（代理不可达、连接被重置、畸形响应、超时…）。
+// 与账号健康无关：不累计 errCount、不改 disabled/cooling，仅在 d 窗口内把该账号从选号中
+// 摘出去，避免同一个坏出口被反复选中；任一成功请求立即解除（NoteSuccess）。
+// 纯内存态：不写 state.json，进程重启后重新探测。
+func (p *Pool) NoteTransportError(uid string, d time.Duration, reason string) {
+	if d <= 0 {
+		d = 5 * time.Minute
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if e, ok := p.byUID[uid]; ok {
+		e.transportUntil = time.Now().Add(d)
+		e.transportReason = reason
+	}
+}
+
+// SetCheckin 记录最近一次签到结果（面板展示：一眼看出哪个账号今天没签/失败）。
+func (p *Pool) SetCheckin(uid, status string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if e, ok := p.byUID[uid]; ok {
+		e.lastCheckinAt = time.Now().Unix()
+		e.lastCheckin = status
+	}
+	p.saveLocked()
 }
 
 // Status 查询单账号状态。
@@ -348,6 +396,12 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		Enabled:  e.enabled,
 		ErrCount: e.errCount,
 		ExpireAt: e.expireAt,
+
+		TransportDown:     !e.transportUntil.IsZero() && now.Before(e.transportUntil),
+		TransportReason:   e.transportReason,
+		TransportUntil:    e.transportUntil,
+		LastCheckinAt:     e.lastCheckinAt,
+		LastCheckinStatus: e.lastCheckin,
 	}
 }
 
@@ -377,6 +431,9 @@ func (p *Pool) load() {
 			reason:   s.Reason,
 			until:    s.Until,
 			expireAt: s.ExpireAt,
+
+			lastCheckinAt: s.LastCheckinAt,
+			lastCheckin:   s.LastCheckinStatus,
 		}
 	}
 }
@@ -393,6 +450,9 @@ func (p *Pool) saveLocked() {
 			Reason:   e.reason,
 			Until:    e.until,
 			ExpireAt: e.expireAt,
+
+			LastCheckinAt:     e.lastCheckinAt,
+			LastCheckinStatus: e.lastCheckin,
 		}
 		// 仅在软关闭时写 enabled=false；默认 true 用 omitempty 省略，旧版本读为 true。
 		if !e.enabled {

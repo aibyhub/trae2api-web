@@ -1,4 +1,4 @@
-﻿// Package server 暴露 OpenAI 兼容 HTTP 接口，内部驱动 pool 挑号 + upstream 转发。
+// Package server 暴露 OpenAI 兼容 HTTP 接口，内部驱动 pool 挑号 + upstream 转发。
 package server
 
 import (
@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -34,6 +35,12 @@ type Config struct {
 	DefaultModel string        // 默认 glm-5.2
 	// Sched 定时调度器：/admin 手动签到/刷新接口的执行体；nil 时对应接口返回 501。
 	Sched *scheduler.Scheduler
+	// TransportCooldown 出口/网络故障（代理不可达等）的临时隔离时长，默认 5m。
+	// 这类错误不累计 errCount，只把该出口从选号中短暂摘掉。
+	TransportCooldown time.Duration
+	// CallbackBase 登录回调 base URL（远程部署/反代场景，如 http://1.2.3.4:18080）；
+	// 空 = 沿用旧行为 http://127.0.0.1:<port>/authorize。
+	CallbackBase string
 }
 
 // maxBodyBytes 请求体大小上限（8MB），超过返回 413。
@@ -50,7 +57,7 @@ type Handler struct {
 	// Web 登录 pending 态：pendingID → 登录进行中的临时上下文。
 	// 回调 /authorize 捕获后标记成功；面板轮询 result 取结果。
 	loginMu sync.Mutex
-	logins   map[string]*pendingLogin
+	logins  map[string]*pendingLogin
 }
 
 // NewHandler 构建 handler。
@@ -75,6 +82,9 @@ func NewHandler(cfg Config) *Handler {
 	}
 	if cfg.DefaultModel == "" {
 		cfg.DefaultModel = upstream.DefaultConfigName
+	}
+	if cfg.TransportCooldown <= 0 {
+		cfg.TransportCooldown = 5 * time.Minute
 	}
 	if cfg.DataDir == "" {
 		cfg.DataDir = "data"
@@ -120,8 +130,10 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("GET /admin/api/rates", h.adminRatesGet)
 	h.mux.HandleFunc("GET /admin/api/proxies", h.withAdminAuth(h.adminProxiesGet))
 	h.mux.HandleFunc("POST /admin/api/proxies", h.withAdminAuth(h.adminProxiesAdd))
+	h.mux.HandleFunc("PUT /admin/api/proxies/{name}", h.withAdminAuth(h.adminProxiesUpdate))
 	h.mux.HandleFunc("DELETE /admin/api/proxies/{name}", h.withAdminAuth(h.adminProxiesDelete))
 	h.mux.HandleFunc("POST /admin/api/proxies/test", h.withAdminAuth(h.adminProxiesTest))
+	h.mux.HandleFunc("POST /admin/api/proxies/test_all", h.withAdminAuth(h.adminProxiesTestAll))
 	return h
 }
 
@@ -441,9 +453,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			lastErr = err
 			var ue *upstream.Error
-			if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead {
+			switch {
+			case errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead:
 				h.cfg.Pool.Disable(acct.UID, "refresh session dead")
-			} else {
+			case upstream.IsTransportError(err):
+				// 刷新走同一个出口，传输层失败同样不算账号错误。
+				log.Printf("refresh uid=%s: 出口/网络故障（不计账号错误）: %v", acct.UID, shortErr(err))
+				h.cfg.Pool.NoteTransportError(acct.UID, h.cfg.TransportCooldown, "刷新 token 出口故障: "+shortErr(err))
+			default:
 				h.cfg.Pool.Cooldown(acct.UID, pool.CoolErr, h.cfg.ErrCooldown, "refresh: "+err.Error())
 			}
 			continue
@@ -455,7 +472,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		rc, status, respBody, terr := h.cfg.Upstream.ChatStream(acct, body)
 		if terr != nil {
 			lastErr = terr
-			h.cfg.Pool.NoteError(acct.UID, h.cfg.ErrThreshold, h.cfg.ErrCooldown)
+			if upstream.IsTransportError(terr) {
+				// 出口/网络故障（代理不可达、连接被重置、畸形响应…）不是账号的问题：
+				// 不累计 errCount（否则出口抖一下就把好账号冷却甚至禁用），只把该出口临时隔离，
+				// 本次请求靠 tried 换号继续。
+				log.Printf("chat_stream uid=%s: 出口/网络故障（不计账号错误）: %v", acct.UID, shortErr(terr))
+				h.cfg.Pool.NoteTransportError(acct.UID, h.cfg.TransportCooldown, "出口/网络故障: "+shortErr(terr))
+			} else {
+				h.cfg.Pool.NoteError(acct.UID, h.cfg.ErrThreshold, h.cfg.ErrCooldown)
+			}
 			continue
 		}
 		if status >= 400 {

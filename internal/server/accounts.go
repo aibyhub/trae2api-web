@@ -1,4 +1,4 @@
-﻿// accounts.go /admin/api/accounts 全套：列表 / 导入 / 删除 / PATCH 开关 / 刷新 / JSON 脱敏预览。
+// accounts.go /admin/api/accounts 全套：列表 / 导入 / 删除 / PATCH 开关 / 刷新 / JSON 脱敏预览。
 //
 // 安全纪律（PLAN §4）：
 //   - 列表与 JSON 预览绝不返回完整 token，只给前缀 + 长度
@@ -34,13 +34,20 @@ type accountSummary struct {
 	Credits      int64  `json:"credits"`
 	ErrCount     int    `json:"err_count,omitempty"`
 	// Token 有效期（Unix 秒）与是否临近过期
-	ExpiresAt    int64  `json:"expires_at,omitempty"`
-	ExpiredSoon  bool   `json:"expired_soon,omitempty"`
-	ExpireAt     int64  `json:"credit_expire_at,omitempty"` // 最近仍有余量的权益包过期时刻（unix 秒）；0 = 未知
-	MachineID    string `json:"machine_id,omitempty"`       // 前 8 位（脱敏）
-	DeviceID     string `json:"device_id,omitempty"`        // 前 8 位（脱敏）
-	Proxy        string `json:"proxy,omitempty"`            // 出口代理（userinfo 脱敏），空 = 直连/全局兜底
-	HasAuth      bool   `json:"has_auth"`
+	ExpiresAt   int64  `json:"expires_at,omitempty"`
+	ExpiredSoon bool   `json:"expired_soon,omitempty"`
+	ExpireAt    int64  `json:"credit_expire_at,omitempty"` // 最近仍有余量的权益包过期时刻（unix 秒）；0 = 未知
+	MachineID   string `json:"machine_id,omitempty"`       // 前 8 位（脱敏）
+	DeviceID    string `json:"device_id,omitempty"`        // 前 8 位（脱敏）
+	Proxy       string `json:"proxy,omitempty"`            // 出口代理（userinfo 脱敏），空 = 直连/全局兜底
+	ProxyName   string `json:"proxy_name,omitempty"`       // 池内名称（面板直接显示名字，便于"不同账号不同出口"）
+	HasAuth     bool   `json:"has_auth"`
+
+	// 出口临时隔离（代理/网络故障），与账号健康无关。
+	TransportDown     bool   `json:"transport_down,omitempty"`
+	TransportReason   string `json:"transport_reason,omitempty"`
+	LastCheckinAt     int64  `json:"last_checkin_at,omitempty"`
+	LastCheckinStatus string `json:"last_checkin_status,omitempty"`
 }
 
 // adminAccounts GET /admin/api/accounts：列表（无鉴权，只读）。
@@ -49,14 +56,19 @@ func (h *Handler) adminAccounts(w http.ResponseWriter, r *http.Request) {
 	out := make([]accountSummary, 0, len(statuses))
 	for _, s := range statuses {
 		sum := accountSummary{
-			UID:       s.UID,
-			Nickname:  s.Nickname,
-			Enabled:   s.Enabled,
-			Disabled:  s.Disabled,
-			Cooling:   s.Cooling,
-			Reason:    s.Reason,
-			Credits:   s.Credits,
-			ErrCount:  s.ErrCount,
+			UID:      s.UID,
+			Nickname: s.Nickname,
+			Enabled:  s.Enabled,
+			Disabled: s.Disabled,
+			Cooling:  s.Cooling,
+			Reason:   s.Reason,
+			Credits:  s.Credits,
+			ErrCount: s.ErrCount,
+
+			TransportDown:     s.TransportDown,
+			TransportReason:   s.TransportReason,
+			LastCheckinAt:     s.LastCheckinAt,
+			LastCheckinStatus: s.LastCheckinStatus,
 		}
 		sum.ExpireAt = s.ExpireAt // 积分包最近过期时刻（选号「先过期优先」的依据）
 		if a := h.cfg.Pool.AuthByUID(s.UID); a != nil {
@@ -68,6 +80,7 @@ func (h *Handler) adminAccounts(w http.ResponseWriter, r *http.Request) {
 			sum.MachineID = prefix(a.MachineID, 8)
 			sum.DeviceID = prefix(a.DeviceID, 8)
 			sum.Proxy = maskProxy(a.ProxyURL)
+			sum.ProxyName = h.proxies.NameFor(a.ProxyURL)
 		}
 		out = append(out, sum)
 	}
@@ -90,10 +103,10 @@ type importRequest struct {
 
 // importResult 导入结果。
 type importResult struct {
-	UID       string `json:"uid"`
-	Nickname  string `json:"nickname,omitempty"`
-	Action    string `json:"action"` // "created" | "updated"
-	NeedsCheck bool  `json:"needs_check,omitempty"` // 建议用户确认额度
+	UID        string `json:"uid"`
+	Nickname   string `json:"nickname,omitempty"`
+	Action     string `json:"action"`                // "created" | "updated"
+	NeedsCheck bool   `json:"needs_check,omitempty"` // 建议用户确认额度
 }
 
 // adminImportAccount POST /admin/api/accounts/import：导入凭证。
@@ -171,8 +184,8 @@ func (h *Handler) importFromCallback(req importRequest) (*auth.Auth, error) {
 	a := &auth.Auth{
 		AccessToken:  info.AccessToken,
 		RefreshToken: info.RefreshToken,
-		UID:         info.UID,
-		Nickname:    info.Nickname,
+		UID:          info.UID,
+		Nickname:     info.Nickname,
 		EnterpriseID: info.EnterpriseID,
 		Domain:       "trae.cn",
 		ApiHost:      "https://api.trae.com.cn",
@@ -180,6 +193,14 @@ func (h *Handler) importFromCallback(req importRequest) (*auth.Auth, error) {
 		DeviceID:     req.DeviceID,
 		ExpiresAt:    info.ExpiresAt,
 	}
+	// 出口代理必须在 ExchangeToken / GetUserInfo / RegisterDevice **之前**确定：
+	// 设备注册的 IP 必须与后续请求的出口 IP 一致（见 deviceregister.go 的不变量说明）。
+	// 之前这里完全没有分配代理 —— 回调导入的账号默认直连，是新账号风控不一致的根因之一。
+	proxy, perr := h.pickImportProxy(req.ProxyURL, info.UID)
+	if perr != nil {
+		return nil, perr
+	}
+	a.ProxyURL = proxy
 	// 有 refreshToken → ExchangeToken 换新 access token（轮换 refreshToken）
 	if a.RefreshToken != "" {
 		if err := h.cfg.Upstream.RefreshToken(a); err != nil {
@@ -251,13 +272,25 @@ func (h *Handler) importFromJSON(req importRequest) (*auth.Auth, error) {
 		}
 		a.DeviceID = req.DeviceID
 	}
-	if req.ProxyURL != "" {
-		if !validProxyURL(strings.TrimSpace(req.ProxyURL)) {
-			return nil, fmt.Errorf("proxy_url 需为 http/https/socks5 代理地址")
+	// 出口代理：显式指定 > auth 文件里已有的 > 保留旧账号配置 > 池内自动均衡。
+	switch {
+	case strings.TrimSpace(req.ProxyURL) != "":
+		p, perr := h.resolveProxyInput(req.ProxyURL)
+		if perr != nil {
+			return nil, perr
 		}
-		a.ProxyURL = strings.TrimSpace(req.ProxyURL)
-	} else if a.ProxyURL == "" {
-		h.autoAssignProxy(a) // 未指定出口时从代理池自动均衡分配
+		a.ProxyURL = p
+	case strings.TrimSpace(a.ProxyURL) != "":
+		if !validProxyURL(a.ProxyURL) {
+			return nil, fmt.Errorf("auth 文件里的 proxyUrl 非法：%s", proxyErrHint)
+		}
+		a.ProxyURL = strings.TrimSpace(a.ProxyURL)
+	default:
+		if old := h.existingProxy(a.UID); old != "" {
+			a.ProxyURL = old
+		} else {
+			h.autoAssignProxy(a) // 未指定出口时从代理池自动均衡分配
+		}
 	}
 	// 缺省 host/domain 补默认
 	if a.Domain == "" {
@@ -359,10 +392,9 @@ func (h *Handler) adminPatchAccount(w http.ResponseWriter, r *http.Request) {
 		_ = a.SaveAtomic()
 	}
 	if req.ProxyURL != nil {
-		p := strings.TrimSpace(*req.ProxyURL)
-		if p != "" && !validProxyURL(p) {
-			writeOpenAIError(w, http.StatusBadRequest, "invalid_request",
-				"proxy_url 需为 http/https/socks5 代理地址，如 socks5://user:pass@1.2.3.4:1080")
+		p, perr := h.resolveProxyInput(*req.ProxyURL)
+		if perr != nil {
+			writeOpenAIError(w, http.StatusBadRequest, "invalid_request", perr.Error())
 			return
 		}
 		a := h.cfg.Pool.AuthByUID(uid)
@@ -382,18 +414,10 @@ func (h *Handler) adminPatchAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Proxy != nil {
 		// 面板路径：值可为代理池名称、原始代理地址或 ""（直连）。
-		v := strings.TrimSpace(*req.Proxy)
-		resolved := ""
-		if v != "" {
-			if u, ok := h.proxies.Resolve(v); ok {
-				resolved = u
-			} else if validProxyURL(v) {
-				resolved = v
-			} else {
-				writeOpenAIError(w, http.StatusBadRequest, "invalid_request",
-					"代理不存在（代理池里没有 "+v+"）且不是合法代理地址")
-				return
-			}
+		resolved, perr := h.resolveProxyInput(*req.Proxy)
+		if perr != nil {
+			writeOpenAIError(w, http.StatusBadRequest, "invalid_request", perr.Error())
+			return
 		}
 		a := h.cfg.Pool.AuthByUID(uid)
 		if a == nil {
@@ -414,17 +438,60 @@ func (h *Handler) adminPatchAccount(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, st2)
 }
 
-// validProxyURL 校验代理地址 scheme。
+// validProxyURL 校验代理地址（scheme 规则与传输层共用 upstream.ValidProxyScheme，
+// 避免"校验层接受、传输层不认 → 静默直连"这类不一致）。
 func validProxyURL(s string) bool {
-	u, err := url.Parse(s)
+	u, err := url.Parse(strings.TrimSpace(s))
 	if err != nil || u.Host == "" {
 		return false
 	}
-	switch u.Scheme {
-	case "http", "https", "socks5", "socks5h":
-		return true
+	return upstream.ValidProxyScheme(u.Scheme)
+}
+
+// resolveProxyInput 把面板/API 传来的代理值解析成可落盘的完整地址：
+//
+//	""          → 直连（返回空串）
+//	池内名称     → 池里的地址
+//	合法代理地址 → 原样
+//	其它        → 错误
+func (h *Handler) resolveProxyInput(v string) (string, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return "", nil
 	}
-	return false
+	if u, ok := h.proxies.Resolve(v); ok {
+		return u, nil
+	}
+	if validProxyURL(v) {
+		return v, nil
+	}
+	return "", fmt.Errorf("代理不存在（代理池里没有 %s）且不是合法地址：%s", v, proxyErrHint)
+}
+
+// existingProxy 返回已存在账号当前的代理地址（无则空）。
+// 用途：重新导入 / 重新登录同一账号时保留原有出口，避免"一登录就把代理清掉"。
+func (h *Handler) existingProxy(uid string) string {
+	if strings.TrimSpace(uid) == "" {
+		return ""
+	}
+	if x := h.cfg.Pool.AuthByUID(uid); x != nil {
+		return strings.TrimSpace(x.ProxyURL)
+	}
+	return ""
+}
+
+// pickImportProxy 决定导入/登录账号的出口：显式指定 > 保留该账号已有配置 > 池内自动均衡。
+// 空池且无显式指定时返回 ""（直连，不报错）。
+func (h *Handler) pickImportProxy(explicit, uid string) (string, error) {
+	if strings.TrimSpace(explicit) != "" {
+		return h.resolveProxyInput(explicit)
+	}
+	if old := h.existingProxy(uid); old != "" {
+		return old, nil
+	}
+	tmp := &auth.Auth{UID: uid}
+	h.autoAssignProxy(tmp)
+	return tmp.ProxyURL, nil
 }
 
 // maskProxy 代理地址脱敏：隐藏 userinfo 凭据（scheme://***@host:port）。
@@ -536,9 +603,9 @@ func (h *Handler) adminRefreshAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	st, _ := h.cfg.Pool.Status(uid)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"uid":       uid,
+		"uid":        uid,
 		"expires_at": a.ExpiresAt,
-		"status":    st,
+		"status":     st,
 	})
 }
 
