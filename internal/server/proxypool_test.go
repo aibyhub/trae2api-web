@@ -3,6 +3,7 @@ package server
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"trae2api-web/internal/auth"
@@ -74,35 +75,102 @@ func TestProxyPoolCRUDAndHealth(t *testing.T) {
 	}
 
 	// 改名 + 改地址：地址变了旧探测缓存必须清空
-	newURL, err := p.Update("RN", "RN2", "socks5://u:p@7.7.7.7:1080")
+	upd, err := p.Update("RN", ProxyUpdate{Name: "RN2", URL: "socks5://u:p@7.7.7.7:1080"})
 	if err != nil {
 		t.Fatalf("update: %v", err)
 	}
-	if newURL != "socks5://u:p@7.7.7.7:1080" {
-		t.Fatalf("update url=%q", newURL)
+	if upd.URL != "socks5://u:p@7.7.7.7:1080" || upd.Name != "RN2" {
+		t.Fatalf("update=%+v", upd)
 	}
 	if _, ok := p.Resolve("RN"); ok {
 		t.Fatal("old name must be gone after rename")
 	}
-	if got := p.NameFor(newURL); got != "RN2" {
+	if got := p.NameFor(upd.URL); got != "RN2" {
 		t.Fatalf("NameFor(new)=%q want RN2", got)
 	}
 	for _, it := range p.All() {
-		if it.Name == "RN2" && it.CheckedAt != 0 {
+		if it.Name == "RN2" && (it.CheckedAt != 0 || it.LastExitIP != "") {
 			t.Fatalf("health cache must reset when url changes: %+v", it)
 		}
 	}
-	if _, err := p.Update("RN2", "do", ""); err == nil {
+	if _, err := p.Update("RN2", ProxyUpdate{Name: "do"}); err == nil {
 		t.Fatal("renaming onto an existing name must fail")
 	}
-	if _, err := p.Update("RN2", "", "https://u:p@8.8.8.8:8443"); err != nil {
+	if _, err := p.Update("RN2", ProxyUpdate{URL: "https://u:p@8.8.8.8:8443"}); err != nil {
 		t.Fatalf("update url only: %v", err)
 	}
 	if got, _ := p.Resolve("RN2"); got != "https://u:p@8.8.8.8:8443" {
 		t.Fatalf("resolve=%q", got)
 	}
-	if _, err := p.Update("不存在", "x", ""); err == nil {
+	// 只改名称，地址保持不变
+	if upd2, err := p.Update("RN2", ProxyUpdate{Name: "RN3"}); err != nil || upd2.URL != "https://u:p@8.8.8.8:8443" {
+		t.Fatalf("rename only: %+v, %v", upd2, err)
+	}
+	if _, err := p.Update("不存在", ProxyUpdate{Name: "x"}); err == nil {
 		t.Fatal("updating a missing entry must fail")
+	}
+}
+
+// TestProxyEnabledAndBulk 停用不参与自动分配 + 批量添加解析。
+func TestProxyEnabledAndBulk(t *testing.T) {
+	p := NewProxyPool(filepath.Join(t.TempDir(), "proxies.json"))
+	u1 := "socks5://u:p@1.1.1.1:1080"
+	if err := p.Add("a", u1); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if !p.All()[0].IsEnabled() {
+		t.Fatal("new entry must default to enabled")
+	}
+	// 停用后不再参与新账号自动分配
+	no := false
+	if _, err := p.Update("a", ProxyUpdate{Enabled: &no}); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	if p.All()[0].IsEnabled() {
+		t.Fatal("entry must be disabled")
+	}
+	if _, ok := p.LeastUsed(map[string]int{}); ok {
+		t.Fatal("disabled proxy must not be auto-assigned")
+	}
+	if _, ok := p.Resolve("a"); !ok {
+		t.Fatal("disabled entry must still resolve (在用账号不受影响)")
+	}
+	yes := true
+	if _, err := p.Update("a", ProxyUpdate{Enabled: &yes}); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	if got, ok := p.LeastUsed(map[string]int{}); !ok || got != u1 {
+		t.Fatalf("LeastUsed=%q,%v want %q", got, ok, u1)
+	}
+
+	// 批量添加：注释/空行忽略，名称可用 空白 / , / = 分隔，纯地址自动命名
+	text := strings.Join([]string{
+		"# 注释行",
+		"",
+		"b socks5://u:p@2.2.2.2:1080",
+		"c,socks5://u:p@3.3.3.3:1080",
+		"d=socks5h://u:p@4.4.4.4:1080",
+		"socks5://u:p@5.5.5.5:1080",
+		"bad 不是地址",
+	}, "\n")
+	added, failed := p.AddBulk(text)
+	if len(added) != 4 {
+		t.Fatalf("added=%v want 4", added)
+	}
+	if len(failed) != 1 {
+		t.Fatalf("failed=%v want 1", failed)
+	}
+	if got := p.NameFor("socks5h://u:p@4.4.4.4:1080"); got != "d" {
+		t.Fatalf("NameFor(d)=%q", got)
+	}
+	autoNamed := false
+	for _, it := range p.All() {
+		if strings.HasPrefix(it.Name, "代理") {
+			autoNamed = true
+		}
+	}
+	if !autoNamed {
+		t.Fatal("a bare url line should be auto-named 代理N")
 	}
 }
 

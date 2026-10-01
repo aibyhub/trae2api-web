@@ -130,6 +130,8 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("GET /admin/api/rates", h.adminRatesGet)
 	h.mux.HandleFunc("GET /admin/api/proxies", h.withAdminAuth(h.adminProxiesGet))
 	h.mux.HandleFunc("POST /admin/api/proxies", h.withAdminAuth(h.adminProxiesAdd))
+	h.mux.HandleFunc("POST /admin/api/proxies/bulk", h.withAdminAuth(h.adminProxiesAddBulk))
+	h.mux.HandleFunc("GET /admin/api/proxies/{name}/url", h.withAdminAuth(h.adminProxyURLGet))
 	h.mux.HandleFunc("PUT /admin/api/proxies/{name}", h.withAdminAuth(h.adminProxiesUpdate))
 	h.mux.HandleFunc("DELETE /admin/api/proxies/{name}", h.withAdminAuth(h.adminProxiesDelete))
 	h.mux.HandleFunc("POST /admin/api/proxies/test", h.withAdminAuth(h.adminProxiesTest))

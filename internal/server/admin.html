@@ -227,6 +227,12 @@
         <button class="btn primary" onclick="addProxy()">添加</button>
       </div>
       <span id="pxStatus" class="status-line" style="display:none"></span>
+      <div style="margin-top:10px">
+        <textarea id="pxBulk" class="imp" style="min-height:0;height:66px;width:100%;padding:8px 10px;font-family:inherit;resize:vertical"
+          placeholder="批量添加：每行一个，`名称 地址` / `名称,地址` / `名称=地址`，或只写地址（自动命名）；# 开头为注释"></textarea>
+        <div class="imp-row" style="margin-top:8px"><button class="btn" onclick="addProxyBulk()">批量添加</button>
+        <span class="muted">支持 socks5:// 与 socks5h://（凭据只存服务器）</span></div>
+      </div>
     </div>
     <div class="panel" style="display:flex;justify-content:space-between;align-items:center;gap:10px">
       <h2 style="margin:0">代理池</h2>
@@ -234,7 +240,7 @@
     </div>
     <div id="proxyPoolTable" class="tblwrap"><div class="muted" style="padding:14px"><span class="spin"></span> 加载中...</div></div>
     <div class="panel" style="margin-top:14px">
-      <span class="muted">说明：账号在「代理」弹窗里从池中选择出口；<b>导入新账号（含粘贴回调链接、网页登录）若未指定出口，自动均衡分配</b>占用最少的代理；重新导入/重登同一账号会<b>保留原有出口</b>。凭据仅存服务器 data/proxies.json，面板不回显明文。建议不同账号使用不同出口 IP（「全部检测」可看每个出口的真实 IP）。</span>
+      <span class="muted">说明：账号在「代理」弹窗里从池中选择出口；<b>导入新账号（含粘贴回调链接、网页登录）若未指定出口，自动均衡分配</b>占用最少的代理；重新导入/重登同一账号会<b>保留原有出口</b>。可<b>编辑</b>名称/地址（并同步改写已引用账号）、<b>停用</b>（不再分配给新账号）、批量添加；地址列表默认脱敏，编辑时会按需回显当前地址。建议不同账号使用不同出口 IP（「全部检测」可看每个出口的真实 IP）。</span>
     </div>
   </div>
 </div>
@@ -736,7 +742,7 @@ async function showProxy(uid){
   const cur = a.proxy || '';
   const matched = pool.find(p=>p.url_masked === cur);
   const options = '<option value="">直连（不使用代理）</option>'
-    + pool.map(p=>'<option value="'+esc(p.name)+'"'+(matched&&matched.name===p.name?' selected':'')+'>'+esc(p.name)+'（'+esc(p.url_masked)+(p.last_exit_ip?' · 出口 '+esc(p.last_exit_ip):'')+'）</option>').join('');
+    + pool.map(p=>'<option value="'+esc(p.name)+'"'+(matched&&matched.name===p.name?' selected':'')+'>'+esc(p.name)+(p.enabled===false?'（已停用）':'')+'（'+esc(p.url_masked)+(p.last_exit_ip?' · 出口 '+esc(p.last_exit_ip):'')+'）</option>').join('');
   showModal('出口代理 — '+(a.nickname||uid),
     '<div class="muted" style="margin-bottom:10px">从代理池选择该账号的出口 IP（不同账号选不同代理，降低风控关联）。新代理在「代理池」页添加。当前出口：<b>'+(cur?esc(cur):'直连')+'</b></div>'
     + '<select id="proxySel" class="imp" style="min-height:0;padding:8px 10px" onchange="document.getElementById(\'proxyCustomWrap\').style.display=this.value===\'__custom__\'?\'\':\'none\'">'
@@ -786,16 +792,18 @@ function pxHealth(p){
 }
 function renderProxies(list){
   list = list || [];
+  window._lastProxies = list;
   document.getElementById('proxyPoolTable').innerHTML = !list.length
     ? '<div class="muted" style="padding:14px">代理池为空 —— 在上方添加代理后，账号即可从下拉里选用。</div>'
     : '<table class="accts"><thead><tr><th>名称</th><th>地址</th><th style="text-align:right">账号数</th><th>出口 IP</th><th>健康</th><th style="text-align:right">操作</th></tr></thead><tbody>'
-      + list.map(p=>'<tr><td class="nick">'+esc(p.name)+'</td><td class="mono">'+esc(p.url_masked)+'</td>'
+      + list.map(p=>'<tr><td class="nick">'+esc(p.name)+(p.enabled===false?' '+badge('已停用','b-warn'):'')+'</td><td class="mono">'+esc(p.url_masked)+'</td>'
         + '<td class="mono num" style="text-align:right">'+fmt(p.accounts)+'</td>'
         + '<td class="mono">'+esc(p.last_exit_ip||'-')+'</td>'
         + '<td>'+pxHealth(p)+'</td>'
         + '<td><div class="row-actions">'
         + '<button class="btn sm" onclick="testPoolProxy(\''+esc(p.name)+'\')">检测</button>'
         + '<button class="btn sm" onclick="editProxy(\''+esc(p.name)+'\')">编辑</button>'
+        + '<button class="btn sm" onclick="toggleProxy(\''+esc(p.name)+'\','+(p.enabled===false?'true':'false')+')">'+(p.enabled===false?'启用':'停用')+'</button>'
         + '<button class="btn sm danger" onclick="deleteProxy(\''+esc(p.name)+'\')">删除</button>'
         + '</div></td></tr>').join('')
       + '</tbody></table>';
@@ -827,7 +835,8 @@ async function addProxy(){
   }catch(e){ pxStatus('err','添加失败：'+e.message); }
 }
 async function deleteProxy(name){
-  if(!confirm('从代理池删除 '+name+'？（已选用它的账号不受影响，仍继续用原地址）')) return;
+  const used = ((window._lastProxies||[]).find(p=>p.name===name)||{}).accounts || 0;
+  if(!confirm('从代理池删除 '+name+'？\n'+(used? '当前有 '+used+' 个账号引用它，删除后这些账号仍继续用原地址（不会被改）。':'当前没有账号引用它。')+'\n（如需停止使用，建议先「停用」而不是删除）')) return;
   try{
     const r = await fetch('/admin/api/proxies/'+encodeURIComponent(name), {method:'DELETE', headers: authHeader()});
     if(!r.ok){ const d = await r.json().catch(()=>({})); alert('删除失败：'+apiErr(d)); }
@@ -867,26 +876,64 @@ async function testAllProxies(){
     renderProxies(list);
   }catch(e){ pxStatus('err','检测失败：'+e.message); }
 }
-function editProxy(name){
-  showModal('编辑代理 — '+name,
-    '<div class="muted" style="margin-bottom:10px">改名称或地址。地址变了可勾选「同步更新引用此代理的账号」，否则那些账号仍指向旧地址。</div>'
+async function toggleProxy(name, enable){
+  try{
+    const r = await fetch('/admin/api/proxies/'+encodeURIComponent(name), {method:'PUT', headers:{'Content-Type':'application/json', ...authHeader()}, body: JSON.stringify({enabled: enable})});
+    const d = await r.json();
+    if(!r.ok){ alert('操作失败：'+apiErr(d)); return; }
+    pxStatus('ok', (enable? '已启用 ' : '已停用 ')+name+(enable? '' : '（不再分配给新账号，已在用账号不变）'));
+    renderProxies(d.proxies);
+  }catch(e){ alert('操作失败：'+e.message); }
+}
+async function addProxyBulk(){
+  const ta = document.getElementById('pxBulk');
+  const text = (ta.value||'').trim();
+  if(!text){ pxStatus('err','先粘贴内容再批量添加'); return; }
+  pxStatus('','批量添加中...');
+  try{
+    const r = await fetch('/admin/api/proxies/bulk', {method:'POST', headers:{'Content-Type':'application/json', ...authHeader()}, body: JSON.stringify({text})});
+    const d = await r.json();
+    if(!r.ok){ pxStatus('err','批量添加失败：'+apiErr(d)); return; }
+    const added = d.added||[], failed = d.failed||[];
+    pxStatus(failed.length?'err':'ok', '批量添加：成功 '+added.length+' 个'+(failed.length?('，失败 '+failed.length+' 个：'+failed.join('； ')):'')+'（出口 IP 后台检测中，几秒后自动刷新）');
+    ta.value='';
+    renderProxies(d.proxies);
+    setTimeout(loadProxies, 6000);
+  }catch(e){ pxStatus('err','批量添加失败：'+e.message); }
+}
+async function editProxy(name){
+  showModal('编辑代理 — '+name, '<div id="pxEditBody"><span class="spin"></span> 读取当前地址...</div>');
+  let url = '';
+  try{
+    // 按需回显完整地址（含凭据）：列表接口脱敏，这里带 API Key 显式拉取，便于直接改。
+    const d = await fetch('/admin/api/proxies/'+encodeURIComponent(name)+'/url', {headers: authHeader(), cache:'no-store'}).then(r=>r.json());
+    url = d.url || '';
+  }catch(e){ /* 拉不到就让用户自己填 */ }
+  const cur = ((window._lastProxies||[]).find(p=>p.name===name)) || {};
+  const body = document.getElementById('pxEditBody');
+  if(!body) return;
+  body.innerHTML = '<div class="muted" style="margin-bottom:10px">改名称 / 地址 / 启用状态。地址变了可勾选「同步更新引用此代理的账号」，否则那些账号仍指向旧地址。</div>'
     + '<input id="pxEditName" class="imp" style="min-height:0;padding:8px 10px" value="'+esc(name)+'" placeholder="名称">'
-    + '<input id="pxEditURL" class="imp" style="min-height:0;padding:8px 10px;margin-top:8px" placeholder="新地址（留空则不改），如 socks5h://user:pass@1.2.3.4:1080">'
-    + '<label class="muted" style="display:flex;align-items:center;gap:6px;margin-top:10px"><input type="checkbox" id="pxEditAccounts" checked> 同步更新引用此代理的账号</label>'
+    + '<input id="pxEditURL" class="imp" style="min-height:0;padding:8px 10px;margin-top:8px" value="'+esc(url)+'" placeholder="代理地址，如 socks5h://user:pass@1.2.3.4:1080">'
+    + '<label class="muted" style="display:flex;align-items:center;gap:6px;margin-top:10px"><input type="checkbox" id="pxEditEnabled" '+(cur.enabled===false?'':'checked')+'> 启用（停用后不再分配给新账号，已在用账号不变）</label>'
+    + '<label class="muted" style="display:flex;align-items:center;gap:6px;margin-top:6px"><input type="checkbox" id="pxEditAccounts" checked> 同步更新引用此代理的账号</label>'
     + '<div class="imp-row" style="margin-top:12px"><button class="btn primary" onclick="saveProxyEdit(\''+esc(name)+'\')">保存</button>'
-    + '<span id="pxEditStatus" class="status-line" style="display:none;margin:0"></span></div>');
+    + '<span id="pxEditStatus" class="status-line" style="display:none;margin:0"></span></div>'
+    + (cur.last_exit_ip? '<div class="muted" style="margin-top:8px">上次检测出口 IP：'+esc(cur.last_exit_ip)+'</div>' : '');
 }
 async function saveProxyEdit(name){
   const nn = document.getElementById('pxEditName').value.trim();
   const nu = document.getElementById('pxEditURL').value.trim();
-  const also = document.getElementById('pxEditAccounts').checked;
+  const also = (document.getElementById('pxEditAccounts')||{}).checked !== false;
+  const en = (document.getElementById('pxEditEnabled')||{}).checked !== false;
   const st = document.getElementById('pxEditStatus');
   st.style.display=''; st.className='status-line'; st.textContent='保存中...';
   try{
-    const r = await fetch('/admin/api/proxies/'+encodeURIComponent(name), {method:'PUT', headers:{'Content-Type':'application/json', ...authHeader()}, body: JSON.stringify({name:nn, url:nu, also_accounts:also})});
+    const r = await fetch('/admin/api/proxies/'+encodeURIComponent(name), {method:'PUT', headers:{'Content-Type':'application/json', ...authHeader()}, body: JSON.stringify({name:nn, url:nu, enabled:en, also_accounts:also})});
     const d = await r.json();
     if(!r.ok){ st.className='status-line err'; st.textContent='保存失败：'+apiErr(d); return; }
     st.className='status-line ok'; st.textContent='已保存';
+    if(d.proxies) renderProxies(d.proxies);
     loadProxies(); loadAccounts();
   }catch(e){ st.className='status-line err'; st.textContent='保存失败：'+e.message; }
 }

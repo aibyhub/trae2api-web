@@ -41,6 +41,9 @@ type ProxyEntry struct {
 	Name string `json:"name"`
 	URL  string `json:"url"`
 
+	// Enabled 停用后不参与新账号自动分配（已在用的账号不受影响）；nil = 启用（向后兼容）。
+	Enabled *bool `json:"enabled,omitempty"`
+
 	CheckedAt   int64  `json:"checked_at,omitempty"` // 最近探测时间（unix 秒）；0 = 从未
 	LastOK      bool   `json:"last_ok,omitempty"`
 	LastStatus  int    `json:"last_status,omitempty"`
@@ -49,10 +52,14 @@ type ProxyEntry struct {
 	LastError   string `json:"last_error,omitempty"`
 }
 
+// IsEnabled 报告条目是否启用（nil = 启用）。
+func (e ProxyEntry) IsEnabled() bool { return e.Enabled == nil || *e.Enabled }
+
 // ProxyView 面板展示视图（地址脱敏 + 引用账号数 + 探测缓存）。
 type ProxyView struct {
 	Name        string `json:"name"`
 	URLMask     string `json:"url_masked"`
+	Enabled     bool   `json:"enabled"`
 	Accounts    int    `json:"accounts"` // 引用该地址的账号数
 	CheckedAt   int64  `json:"checked_at,omitempty"`
 	LastOK      bool   `json:"last_ok"`
@@ -130,12 +137,19 @@ func (p *ProxyPool) Add(name, rawURL string) error {
 	return p.saveLocked()
 }
 
-// Update 修改池内条目（改名 / 改地址），返回更新后的地址。
+// ProxyUpdate 编辑代理的可选字段：空字符串 = 不改；Enabled 非 nil = 设置启用状态。
+type ProxyUpdate struct {
+	Name    string
+	URL     string
+	Enabled *bool
+}
+
+// Update 修改池内条目（改名 / 改地址 / 启用停用），返回更新后的条目。
 // 名称与地址都必须唯一（排除自身）；地址变了则清空旧探测缓存。
 // 已引用旧地址的账号是否同步改写由调用方决定（rewriteAccountProxy）。
-func (p *ProxyPool) Update(oldName, newName, newURL string) (string, error) {
-	newName = trimSpace(newName)
-	newURL = trimSpace(newURL)
+func (p *ProxyPool) Update(oldName string, up ProxyUpdate) (ProxyEntry, error) {
+	newName := trimSpace(up.Name)
+	newURL := trimSpace(up.URL)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	idx := -1
@@ -146,7 +160,7 @@ func (p *ProxyPool) Update(oldName, newName, newURL string) (string, error) {
 		}
 	}
 	if idx < 0 {
-		return "", errBadRequest("代理不存在：" + oldName)
+		return ProxyEntry{}, errBadRequest("代理不存在：" + oldName)
 	}
 	cur := p.items[idx]
 	if newName == "" {
@@ -156,28 +170,76 @@ func (p *ProxyPool) Update(oldName, newName, newURL string) (string, error) {
 		newURL = cur.URL
 	}
 	if !validProxyURL(newURL) {
-		return "", errBadRequest(proxyErrHint)
+		return ProxyEntry{}, errBadRequest(proxyErrHint)
 	}
 	for i, it := range p.items {
 		if i == idx {
 			continue
 		}
 		if it.Name == newName {
-			return "", errBadRequest("名称已存在：" + newName)
+			return ProxyEntry{}, errBadRequest("名称已存在：" + newName)
 		}
 		if it.URL == newURL {
-			return "", errBadRequest("该代理地址已存在（名称 " + it.Name + "）")
+			return ProxyEntry{}, errBadRequest("该代理地址已存在（名称 " + it.Name + "）")
 		}
 	}
 	if newURL != cur.URL {
 		cur.CheckedAt, cur.LastOK, cur.LastStatus, cur.LastLatency, cur.LastExitIP, cur.LastError = 0, false, 0, 0, "", ""
 	}
 	cur.Name, cur.URL = newName, newURL
+	if up.Enabled != nil {
+		cur.Enabled = up.Enabled
+	}
 	p.items[idx] = cur
 	if err := p.saveLocked(); err != nil {
-		return "", err
+		return ProxyEntry{}, err
 	}
-	return cur.URL, nil
+	return cur, nil
+}
+
+// AddBulk 批量添加（每行一条：`名称 地址` / `名称,地址` / `名称=地址` / 纯地址自动命名 代理N）。
+// 每行独立处理，返回成功名称与失败明细（含原因），支持 # 注释与空行。
+func (p *ProxyPool) AddBulk(text string) (added []string, failed []string) {
+	auto := 0
+	for _, raw := range strings.Split(text, "\n") {
+		line := trimSpace(strings.TrimSuffix(raw, "\r"))
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		name, rawURL := splitBulkLine(line)
+		if name == "" {
+			for {
+				auto++
+				name = fmt.Sprintf("代理%d", auto)
+				if _, ok := p.Resolve(name); !ok {
+					break
+				}
+			}
+		}
+		if err := p.Add(name, rawURL); err != nil {
+			failed = append(failed, line+" → "+err.Error())
+			continue
+		}
+		added = append(added, name)
+	}
+	return added, failed
+}
+
+// splitBulkLine 拆分一行批量输入；只有地址时名称为空。
+// 只在「分隔符右侧是合法代理地址」时才认为左侧是名称，避免把地址里的 = / , 误判。
+func splitBulkLine(line string) (name, rawURL string) {
+	for _, sep := range []string{"\t", " ", ",", "=", "|"} {
+		i := strings.Index(line, sep)
+		if i <= 0 || i+len(sep) >= len(line) {
+			continue
+		}
+		l := trimSpace(line[:i])
+		r := trimSpace(line[i+len(sep):])
+		if validProxyURL(r) {
+			return l, r
+		}
+	}
+	return "", trimSpace(line)
 }
 
 // Remove 删除（账号已引用的地址不受影响，只是池里不再列出）。
@@ -236,12 +298,10 @@ func (p *ProxyPool) SetHealth(name string, r upstream.ProxyProbeResult) {
 		if r.ExitIP != "" {
 			it.LastExitIP = r.ExitIP
 		}
+		// 只记录「拿不到响应」的传输层错误；上游 4xx/5xx 属正常回包，状态码单独展示。
 		it.LastError = ""
-		switch {
-		case r.Err != nil:
+		if r.Err != nil {
 			it.LastError = r.Err.Error()
-		case r.Status >= 400:
-			it.LastError = fmt.Sprintf("上游根路径 HTTP %d（属正常，仅记录）", r.Status)
 		}
 		p.items[i] = it
 		_ = p.saveLocked()
@@ -256,6 +316,9 @@ func (p *ProxyPool) LeastUsed(inUse map[string]int) (string, bool) {
 	defer p.mu.Unlock()
 	best, bestN := "", -1
 	for _, it := range p.items {
+		if !it.IsEnabled() {
+			continue // 停用的代理不再参与新账号自动分配
+		}
 		n := inUse[it.URL]
 		if bestN == -1 || n < bestN {
 			best, bestN = it.URL, n
@@ -287,6 +350,10 @@ func (h *Handler) adminProxiesAdd(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	// 新增后立即探测一次（短超时），面板马上能看到出口 IP / 延迟 / 健康。
+	if pr, ok := h.probeAndStore(trimSpace(req.Name), 8*time.Second); ok {
+		log.Printf("proxy added %s: ok=%v exit_ip=%s err=%v", req.Name, proxyOK(pr), pr.ExitIP, pr.Err)
+	}
 	h.writeProxyList(w)
 }
 
@@ -297,6 +364,7 @@ func (h *Handler) adminProxiesUpdate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name         string `json:"name"`
 		URL          string `json:"url"`
+		Enabled      *bool  `json:"enabled"`
 		AlsoAccounts bool   `json:"also_accounts"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 1<<20)).Decode(&req); err != nil {
@@ -304,16 +372,21 @@ func (h *Handler) adminProxiesUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	oldURL, _ := h.proxies.Resolve(oldName)
-	newURL, err := h.proxies.Update(oldName, req.Name, req.URL)
+	updated, err := h.proxies.Update(oldName, ProxyUpdate{Name: req.Name, URL: req.URL, Enabled: req.Enabled})
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
 	changed := 0
-	if req.AlsoAccounts && oldURL != "" && newURL != "" && oldURL != newURL {
-		changed = h.rewriteAccountProxy(oldURL, newURL)
+	if req.AlsoAccounts && oldURL != "" && updated.URL != "" && oldURL != updated.URL {
+		changed = h.rewriteAccountProxy(oldURL, updated.URL)
 	}
-	log.Printf("proxy updated: %s → %s（地址%s，同步账号 %d 个）", oldName, h.proxies.NameFor(newURL), maskProxy(newURL), changed)
+	// 地址变了就重新探测一次，保证面板里的出口 IP / 延迟不是旧值。
+	if oldURL != updated.URL {
+		h.probeAndStore(updated.Name, 8*time.Second)
+	}
+	log.Printf("proxy updated: %s → %s（地址%s，启用=%v，同步账号 %d 个）",
+		oldName, updated.Name, maskProxy(updated.URL), updated.IsEnabled(), changed)
 	h.writeProxyList(w)
 }
 
@@ -379,6 +452,65 @@ func (h *Handler) adminProxiesTestAll(w http.ResponseWriter, r *http.Request) {
 	h.writeProxyList(w)
 }
 
+// probeAndStore 探测单个池内代理并把结果写回缓存（同步）。
+func (h *Handler) probeAndStore(name string, timeout time.Duration) (upstream.ProxyProbeResult, bool) {
+	raw, ok := h.proxies.Resolve(name)
+	if !ok {
+		return upstream.ProxyProbeResult{}, false
+	}
+	pr := h.cfg.Upstream.ProbeProxy(raw, timeout)
+	h.proxies.SetHealth(name, pr)
+	return pr, true
+}
+
+// adminProxyURLGet GET /admin/api/proxies/{name}/url：按需回显完整地址（含凭据）。
+// 列表接口一律脱敏；只有已通过 API Key 鉴权的显式请求才回显，用于面板「编辑」预填当前地址。
+func (h *Handler) adminProxyURLGet(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	raw, ok := h.proxies.Resolve(name)
+	if !ok {
+		writeOpenAIError(w, http.StatusNotFound, "not_found", "proxy not found: "+name)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"name": name, "url": raw})
+}
+
+// adminProxiesAddBulk POST /admin/api/proxies/bulk {text}：一次粘贴多行批量添加。
+// 探测在后台异步进行（批量可能有几十条），面板稍后刷新即可看到出口 IP。
+func (h *Handler) adminProxiesAddBulk(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Text string `json:"text"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "decode body: "+err.Error())
+		return
+	}
+	if trimSpace(req.Text) == "" {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "内容为空")
+		return
+	}
+	added, failed := h.proxies.AddBulk(req.Text)
+	if len(added) > 0 {
+		go func(names []string) {
+			for _, n := range names {
+				h.probeAndStore(n, 10*time.Second)
+			}
+		}(added)
+	}
+	log.Printf("proxy bulk add: +%d, failed=%d", len(added), len(failed))
+	usage := h.proxyUsage()
+	items := h.proxies.All()
+	out := make([]ProxyView, 0, len(items))
+	for _, it := range items {
+		out = append(out, ProxyView{
+			Name: it.Name, URLMask: maskProxy(it.URL), Enabled: it.IsEnabled(), Accounts: usage[it.URL],
+			CheckedAt: it.CheckedAt, LastOK: it.LastOK, LastStatus: it.LastStatus,
+			LastLatency: it.LastLatency, LastExitIP: it.LastExitIP, LastError: it.LastError,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"added": added, "failed": failed, "proxies": out})
+}
+
 // ProbeAllProxies 并发探测池内全部代理并写回缓存（启动自检 + 面板「全部检测」）。
 // 并发上限 4，单个探测 10s 超时；结果只写缓存，不影响任何账号状态。
 func (h *Handler) ProbeAllProxies() {
@@ -412,6 +544,7 @@ func (h *Handler) writeProxyList(w http.ResponseWriter) {
 		out = append(out, ProxyView{
 			Name:        it.Name,
 			URLMask:     maskProxy(it.URL),
+			Enabled:     it.IsEnabled(),
 			Accounts:    usage[it.URL],
 			CheckedAt:   it.CheckedAt,
 			LastOK:      it.LastOK,
