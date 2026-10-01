@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"strings"
 	"time"
 
 	"trae2api-web/internal/pool"
@@ -115,13 +116,19 @@ func (s *Scheduler) CheckinUID(uid string) Result {
 		res.Status = "checkin_off"
 		log.Printf("checkin %s: checkin disabled upstream", uid)
 	default:
-		// 9074「当前参与用户太多」实测为确定性反滥用拒绝（22:27 非整点三次重试
-		// 结果完全一致、同 host 读接口正常），重放无意义——单次失败即返回，
-		// 让错误原样暴露给面板（协议对齐修复见 upstream.UgHeaders/ugCheckinBody）。
+		// 9074「当前参与用户太多」实测为确定性反滥用拒绝（随机设备号未注册），
+		// 重放无意义——单次失败即返回，让错误原样暴露给面板。
+		// 9095「当前设备今日已经签到」：共享注册设备号（TW2A_UG_DEVICE_ID）时
+		// 当日名额已被占，语义等同已签到，不算错误。
 		if claimErr := s.cfg.Upstream.CheckinClaim(a); claimErr != nil {
-			res.Status = "error"
-			res.Error = claimErr.Error()
-			log.Printf("checkin claim %s: %v", uid, claimErr)
+			if strings.Contains(claimErr.Error(), "9095") {
+				res.Status = "already"
+				log.Printf("checkin %s: device already claimed today (9095)", uid)
+			} else {
+				res.Status = "error"
+				res.Error = claimErr.Error()
+				log.Printf("checkin claim %s: %v", uid, claimErr)
+			}
 		} else {
 			res.Status = "claimed"
 			log.Printf("checkin %s: ok", uid)

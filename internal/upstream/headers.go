@@ -3,6 +3,8 @@ package upstream
 
 import (
 	"net/http"
+	"os"
+	"strings"
 
 	"trae2api-web/internal/auth"
 )
@@ -50,19 +52,32 @@ func SOLOHeaders(req *http.Request, a *auth.Auth, stream bool) {
 	}
 }
 
+// ugDeviceIDOverride TW2A_UG_DEVICE_ID：强制 UG 通道（签到/积分）使用的 x-device-id。
+// 背景（2026-10-01 实测）：上游 claim 校验「设备须已注册 + 每设备每日一次（跨账号）」；
+// 随机 hex32 设备号必被 9074「当前参与用户太多」（通用反滥用文案）拒绝，
+// 换真实客户端注册过的设备号（16 位纯数字）即通过（code=0）。
+// 共用一个注册设备号时，当日首个 claim 成功，其余账号返回 9095
+// 「当前设备今日已经签到」（调度器按已签到处理）。优先级高于 auth 文件的 deviceId。
+func ugDeviceIDOverride() string {
+	return strings.TrimSpace(os.Getenv("TW2A_UG_DEVICE_ID"))
+}
+
 // UgHeaders 设置签到/积分（api.trae.cn）所需头。
 // 协议逆向自 TRAE SOLO CN 0.1.64 主进程（resources/app/out/main.js）：
 // UG 请求的应用层头 = cb()（Content-Type + Authorization）+ fb()（5 个设备头），
 // 共 7 个，经 Electron net.fetch 原样透传。真实客户端不发 X-Machine-Id /
 // X-User-Region / X-Cloudide-Token，这里不再多发（v1.1.3 及之前多发头属指纹偏离）。
-// X-Device-Id 取自 auth 文件（登录时随 OAuth 提交给上游的设备对）；
-// 导入路径随机生成的设备对未在上游注册，claim 可能仍被 9074 拒绝——
-// 届时用面板重登，或导入时以真实客户端设备号覆盖（见 server.accounts.go）。
+// X-Device-Id 优先取 TW2A_UG_DEVICE_ID（注册设备号），否则用 auth 文件的
+// deviceId（登录流程生成，未在上游注册——claim 会被 9074 拒绝）。
 func UgHeaders(req *http.Request, a *auth.Auth) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Cloud-IDE-JWT "+a.JWT()) // 读锁快照
-	if a.DeviceID != "" {
-		req.Header.Set("X-Device-Id", a.DeviceID)
+	did := ugDeviceIDOverride()
+	if did == "" {
+		did = a.DeviceID
+	}
+	if did != "" {
+		req.Header.Set("X-Device-Id", did)
 	}
 	req.Header.Set("X-Device-Brand", DeviceBrand) // commonParams.device_model
 	req.Header.Set("X-Device-Type", DeviceOSName) // commonParams.os_name

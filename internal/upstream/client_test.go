@@ -326,3 +326,30 @@ func TestCheckinStatusAndClaim(t *testing.T) {
 		t.Errorf("checkin body=%s want req_source=2 (SOLO_Lite)", body)
 	}
 }
+
+// TestUgDeviceIdOverride TW2A_UG_DEVICE_ID 强制覆盖 UG 通道 x-device-id
+// （注册设备号；随机设备号 claim 会被 9074 拒绝，2026-10-01 实测）。
+func TestUgDeviceIdOverride(t *testing.T) {
+	var got string
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		got = r.Header.Get("X-Device-Id")
+		return jsonResp(200, `{"checked_in":false,"enable":true}`), nil
+	})
+	a := &auth.Auth{AccessToken: "at", DeviceID: "0123456789abcdef0123456789abcdef"}
+
+	t.Setenv("TW2A_UG_DEVICE_ID", "")
+	if err := c.CheckinClaim(a); err != nil {
+		t.Fatal(err)
+	}
+	if got != a.DeviceID {
+		t.Errorf("no override: X-Device-Id=%q want auth deviceId", got)
+	}
+
+	t.Setenv("TW2A_UG_DEVICE_ID", "4003784254113003")
+	if err := c.CheckinClaim(a); err != nil {
+		t.Fatal(err)
+	}
+	if got != "4003784254113003" {
+		t.Errorf("override: X-Device-Id=%q want env value", got)
+	}
+}
