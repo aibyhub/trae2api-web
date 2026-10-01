@@ -504,14 +504,15 @@ func (c *Client) UserEntUsage(a *auth.Auth) (remain int64, err error) {
 	return remain, err
 }
 
-// EntPack 单个权益包明细（面板展示：名称/额度/已用/过期时间）。
+// EntPack 单个权益包明细（面板展示：名称/额度/已用/生效与过期时间）。
 type EntPack struct {
-	Name     string `json:"name"`      // display_desc，如「签到奖励」
-	Group    string `json:"group"`     // group_name，如「每日签到」
-	Limit    int64  `json:"limit"`
-	Used     int64  `json:"used"`
-	ExpireAt int64  `json:"expire_at"` // unix 秒；0 = 未知
-	Status   int    `json:"status"`
+	Name      string `json:"name"`      // display_desc，如「签到奖励」
+	Group     string `json:"group"`     // group_name，如「每日签到」
+	Limit     int64  `json:"limit"`
+	Used      int64  `json:"used"`
+	ExpireAt  int64  `json:"expire_at"` // unix 秒；0 = 未知
+	StartTime int64  `json:"start_time"` // unix 秒：领取/生效时刻（可看到定时任务几点领的分）
+	Status    int    `json:"status"`
 }
 
 // SoonestExpiry 返回仍有余量（limit-used>0）的包中最近的过期时刻；
@@ -549,6 +550,7 @@ func (c *Client) EntUsageDetail(a *auth.Auth) (packs []EntPack, remain, limit, u
 			DisplayDesc string `json:"display_desc"`
 			GroupName   string `json:"group_name"`
 			ExpireTime  int64  `json:"expire_time"`
+			StartTime   int64  `json:"start_time"`
 			Status      int    `json:"status"`
 			EntitlementBaseInfo struct {
 				Quota struct {
@@ -574,7 +576,7 @@ func (c *Client) EntUsageDetail(a *auth.Auth) (packs []EntPack, remain, limit, u
 		remain += l - u
 		packs = append(packs, EntPack{
 			Name: p.DisplayDesc, Group: p.GroupName,
-			Limit: l, Used: u, ExpireAt: p.ExpireTime, Status: p.Status,
+			Limit: l, Used: u, ExpireAt: p.ExpireTime, StartTime: p.StartTime, Status: p.Status,
 		})
 	}
 	return packs, remain, limit, used, nil

@@ -65,13 +65,18 @@ func main() {
 		tr.ResponseHeaderTimeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	}
 
+	checkinHours := cfg.Schedule.CheckinHours
+	if len(checkinHours) == 0 {
+		checkinHours = []int{cfg.Schedule.CheckinHour}
+	}
 	sch := scheduler.New(scheduler.Config{
-		Pool:          p,
-		Upstream:      up,
-		CheckinHour:   cfg.Schedule.CheckinHour,
-		RefreshHours:  cfg.Schedule.RefreshHours,
-		JitterMinutes: cfg.Schedule.JitterMinutes,
-		RefreshSkew:   24 * time.Hour,
+		Pool:           p,
+		Upstream:       up,
+		CheckinHours:   checkinHours,
+		RefreshHours:   cfg.Schedule.RefreshHours,
+		JitterMinutes:  cfg.Schedule.JitterMinutes,
+		BalanceRefresh: time.Duration(cfg.Schedule.BalanceRefreshMin) * time.Minute,
+		RefreshSkew:    24 * time.Hour,
 	})
 
 	h := server.NewHandler(server.Config{

@@ -86,7 +86,7 @@ func newTestScheduler(f *fakeUpstream, p *pool.Pool, srv *httptest.Server) *Sche
 	return New(Config{
 		Pool:         p,
 		Upstream:     up,
-		CheckinHour:  9,
+		CheckinHours: []int{9},
 		RefreshHours: []int{3},
 		RefreshSkew:  time.Hour,
 	})

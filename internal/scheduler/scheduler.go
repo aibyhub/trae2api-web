@@ -18,12 +18,14 @@ import (
 
 // Config 调度器依赖。
 type Config struct {
-	Pool          *pool.Pool
-	Upstream      *upstream.Client
-	CheckinHour   int           // 每日签到小时，默认 9
-	RefreshHours  []int         // token 预刷新小时，默认 [3]
-	JitterMinutes int           // 签到随机延迟窗口（分钟），默认 60；负数 = 关闭
-	RefreshSkew   time.Duration // 预刷新窗口，默认 24h
+	Pool           *pool.Pool
+	Upstream       *upstream.Client
+	CheckinHours   []int         // 每日签到时点（小时列表，如 [9,21]），默认 [9]；
+	                              // 多时点 = 失败重试窗口（claim 幂等，不会重复领）
+	RefreshHours   []int         // token 预刷新小时，默认 [3]
+	JitterMinutes  int           // 签到随机延迟窗口（分钟），默认 60；负数 = 关闭
+	BalanceRefresh time.Duration // 余额/过期数据后台刷新间隔，默认 30m；0 = 关闭
+	RefreshSkew    time.Duration // 预刷新窗口，默认 24h
 }
 
 // Scheduler 调度器。
@@ -33,8 +35,8 @@ type Scheduler struct {
 
 // New 构建。
 func New(cfg Config) *Scheduler {
-	if cfg.CheckinHour < 0 {
-		cfg.CheckinHour = 9
+	if len(cfg.CheckinHours) == 0 {
+		cfg.CheckinHours = []int{9}
 	}
 	if len(cfg.RefreshHours) == 0 {
 		cfg.RefreshHours = []int{3}
@@ -44,6 +46,9 @@ func New(cfg Config) *Scheduler {
 	}
 	if cfg.JitterMinutes < 0 {
 		cfg.JitterMinutes = 0
+	}
+	if cfg.BalanceRefresh < 0 {
+		cfg.BalanceRefresh = 0
 	}
 	if cfg.RefreshSkew <= 0 {
 		cfg.RefreshSkew = 24 * time.Hour
@@ -68,13 +73,28 @@ func nextFire(now time.Time, hours []int) time.Time {
 
 // Run 主循环，阻塞直到 ctx 取消。
 func (s *Scheduler) Run(ctx context.Context) {
-	// 启动补签：容器在签到窗口内重启过，则为各账号安排带抖动的补签
+	// 余额/过期数据后台刷新（让「积分先过期优先」路由的数据保持新鲜）。
+	if s.cfg.BalanceRefresh > 0 {
+		go func() {
+			t := time.NewTicker(s.cfg.BalanceRefresh)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					s.refreshBalances()
+				}
+			}
+		}()
+	}
+	// 启动补签：容器在任一签到窗口内重启过，则为各账号安排带抖动的补签
 	// （CheckinUID 幂等：上游已签到则直接返回 already）。
 	if s.inCheckinWindow(time.Now()) {
 		log.Printf("startup within checkin window — scheduling jittered checkins")
 		s.scheduleCheckins(ctx)
 	}
-	all := append(append([]int{}, s.cfg.RefreshHours...), s.cfg.CheckinHour)
+	all := append(append([]int{}, s.cfg.RefreshHours...), s.cfg.CheckinHours...)
 	for {
 		next := nextFire(time.Now(), all)
 		timer := time.NewTimer(time.Until(next))
@@ -87,18 +107,23 @@ func (s *Scheduler) Run(ctx context.Context) {
 			if contains(s.cfg.RefreshHours, h) {
 				s.RunRefreshNow()
 			}
-			if s.cfg.CheckinHour == h {
+			if contains(s.cfg.CheckinHours, h) {
 				s.scheduleCheckins(ctx)
 			}
 		}
 	}
 }
 
-// inCheckinWindow 报告 now 是否落在今日 [CheckinHour:00, CheckinHour+Jitter) 内。
+// inCheckinWindow 报告 now 是否落在任一签到时点的 [H:00, H+Jitter) 内。
 func (s *Scheduler) inCheckinWindow(now time.Time) bool {
-	start := time.Date(now.Year(), now.Month(), now.Day(), s.cfg.CheckinHour, 0, 0, 0, now.Location())
-	end := start.Add(time.Duration(s.cfg.JitterMinutes) * time.Minute)
-	return !now.Before(start) && now.Before(end)
+	for _, h := range s.cfg.CheckinHours {
+		start := time.Date(now.Year(), now.Month(), now.Day(), h, 0, 0, 0, now.Location())
+		end := start.Add(time.Duration(s.cfg.JitterMinutes) * time.Minute)
+		if !now.Before(start) && now.Before(end) {
+			return true
+		}
+	}
+	return false
 }
 
 // scheduleCheckins 为每个账号安排一次带独立随机延迟的签到（每日重掷，账号间互不相同）。
@@ -223,6 +248,26 @@ func (s *Scheduler) RunCheckinNow() []Result {
 		out = append(out, s.CheckinUID(st.UID))
 	}
 	return out
+}
+
+// refreshBalances 后台静默刷新全部账号的积分与最近过期包
+//（喂给「积分先过期优先」选号与面板额度展示；不写日志除非出错）。
+func (s *Scheduler) refreshBalances() {
+	for _, st := range s.cfg.Pool.List() {
+		if st.Disabled {
+			continue
+		}
+		a := s.cfg.Pool.AuthByUID(st.UID)
+		if a == nil || a.RefreshTokenValue() == "" {
+			continue
+		}
+		packs, remain, _, _, err := s.cfg.Upstream.EntUsageDetail(a)
+		if err != nil {
+			continue
+		}
+		s.cfg.Pool.SetExpiry(st.UID, upstream.SoonestExpiry(packs))
+		s.cfg.Pool.SetCredits(st.UID, remain)
+	}
 }
 
 // RefreshUID 刷新单账号 token 并落盘；session 失效自动禁用。

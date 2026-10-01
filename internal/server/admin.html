@@ -171,7 +171,7 @@
     </div>
 
     <div class="panel">
-      <h2>定时任务<small style="color:var(--dim);font-weight:400;margin-left:8px">每日自动：签到 9:00 · token 刷新 3:00（Asia/Shanghai）</small></h2>
+      <h2>定时任务<small style="color:var(--dim);font-weight:400;margin-left:8px">签到时点 TW2A_CHECKIN_HOURS（默认 9，多时点=失败重试窗口，每号独立随机 0-60 分钟抖动）· token 刷新 3:00 · 余额后台刷新 30 分钟（Asia/Shanghai）</small></h2>
       <div class="imp-row">
         <button class="btn primary" id="checkinAllBtn" onclick="checkinAll()">立即签到（全部账号）</button>
         <button class="btn" id="refreshAllBtn" onclick="refreshAllTokens()">立即刷新凭证</button>
@@ -557,23 +557,25 @@ function renderCredits(d){
 function showPacks(idx){
   const a = (window._lastCredits||[])[idx];
   if(!a || !a.packs_detail) return;
-  const packs = [...a.packs_detail].sort((x,y)=>(x.expire_at||9e15)-(y.expire_at||9e15));
+  const packs = [...a.packs_detail].sort((x,y)=>(y.start_time||0)-(x.start_time||0));
   const rows = packs.map(p=>{
     const dl = daysLeft(p.expire_at);
     let expBadge = badge(fmtDate(p.expire_at)+(dl<=3650?'（剩 '+dl+' 天）':''), dl<=7?'b-bad':(dl<=30?'b-warn':'b-dim'));
+    const got = p.start_time ? new Date(p.start_time*1000).toLocaleString() : '-';
     return '<tr>'
       + '<td>'+esc(p.name||'(未命名)')+'</td>'
       + '<td class="mono">'+esc(p.group||'-')+'</td>'
       + '<td class="mono num">'+fmt(p.limit)+'</td>'
       + '<td class="mono num">'+fmt(p.used)+'</td>'
+      + '<td class="mono">'+esc(got)+'</td>'
       + '<td>'+expBadge+'</td>'
       + '</tr>';
   }).join('');
   showModal('积分明细 — '+(a.nickname||a.uid),
     '<div class="tblwrap" style="border-radius:8px"><table class="accts"><thead><tr>'
-    + '<th>权益包</th><th>分组</th><th style="text-align:right">额度</th><th style="text-align:right">已用</th><th>过期时间</th>'
+    + '<th>权益包</th><th>分组</th><th style="text-align:right">额度</th><th style="text-align:right">已用</th><th>领取时间</th><th>过期时间</th>'
     + '</tr></thead><tbody>'+rows+'</tbody></table></div>'
-    + '<div class="muted" style="margin-top:10px">剩余 = Σ(额度 − 已用)；过期时间来自上游权益包（expire_time），与 TRAE 客户端一致。</div>');
+    + '<div class="muted" style="margin-top:10px">剩余 = Σ(额度 − 已用)；「领取时间」= 权益包生效时刻（start_time，可看到定时任务几点领的分）；过期时间来自上游权益包，与 TRAE 客户端一致。</div>');
 }
 async function loadCredits(){
   try{

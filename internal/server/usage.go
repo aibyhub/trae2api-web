@@ -337,17 +337,21 @@ func (h *Handler) nicknameFor(uid string) string {
 	return ""
 }
 
+// drNonOfficialModels 非 Trae 官方模型的 config 条目（套餐/组合伪模型，无独立倍率）。
+var drNonOfficialModels = map[string]bool{"free-stack": true, "combo": true}
+
 // adminRatesGet GET /admin/api/rates：官方模型倍率表（get_detail_param
 // display_contact_config.consumption_rate，上游定义，只读）。
-// 只列 Trae 自带模型：剔除自定义占位（is_custom_model）与内部模型
-// （is_invisible_to_user，如 subagent）；按倍率升序（未知倍率垫底）。
+// 只列 Trae 自带模型：剔除自定义占位（is_custom_model）、内部模型
+// （is_invisible_to_user，如 subagent）与套餐伪模型（free-stack/combo）；
+// 按倍率升序（未知倍率垫底）。
 func (h *Handler) adminRatesGet(w http.ResponseWriter, r *http.Request) {
 	infos := h.fetchDynamicModels()
 	out := make([]map[string]any, 0, len(infos))
 	for _, mi := range infos {
 		// 自定义占位：is_custom_model 标记 + custom_model_ 前缀双保险
 		// （实测 CN 上游对 custom_model_* 的 is_custom_model 仍为 false）
-		if mi.Custom || mi.Invisible || strings.HasPrefix(mi.ID, "custom_model_") {
+		if mi.Custom || mi.Invisible || strings.HasPrefix(mi.ID, "custom_model_") || drNonOfficialModels[mi.ID] {
 			continue
 		}
 		out = append(out, map[string]any{

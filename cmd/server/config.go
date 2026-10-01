@@ -28,9 +28,11 @@ type Config struct {
 	} `json:"cooldown"`
 
 	Schedule struct {
-		CheckinHour   int   `json:"checkin_hour"`           // 9
-		RefreshHours  []int `json:"refresh_hours"`          // [3]
-		JitterMinutes int   `json:"checkin_jitter_minutes"` // 签到随机延迟窗口（分钟），默认 60，负数关闭
+		CheckinHour    int    `json:"checkin_hour"`           // 旧字段（单时点），被 checkin_hours 取代
+		CheckinHours   []int  `json:"checkin_hours"`          // 签到时点列表，默认 [9]；多时点=失败重试窗口
+		RefreshHours   []int  `json:"refresh_hours"`          // [3]
+		JitterMinutes  int    `json:"checkin_jitter_minutes"` // 签到随机延迟窗口（分钟），默认 60，负数关闭
+		BalanceRefreshMin int `json:"balance_refresh_minutes"` // 余额后台刷新间隔，默认 30，0 关闭
 	} `json:"schedule"`
 
 	Upstream struct {
@@ -58,7 +60,9 @@ func Default() *Config {
 	c.Cooldown.ErrThresh = 3
 	c.Cooldown.ErrCooldown = "10m"
 	c.Schedule.CheckinHour = 9
+	c.Schedule.CheckinHours = []int{9}
 	c.Schedule.RefreshHours = []int{3}
+	c.Schedule.BalanceRefreshMin = 30
 	c.Upstream.TimeoutSeconds = 120
 	return c
 }
@@ -122,6 +126,22 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("TW2A_CHECKIN_HOUR"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			c.Schedule.CheckinHour = n
+		}
+	}
+	if v := os.Getenv("TW2A_CHECKIN_HOURS"); v != "" {
+		var hours []int
+		for _, part := range strings.Split(v, ",") {
+			if n, err := strconv.Atoi(strings.TrimSpace(part)); err == nil && n >= 0 && n <= 23 {
+				hours = append(hours, n)
+			}
+		}
+		if len(hours) > 0 {
+			c.Schedule.CheckinHours = hours
+		}
+	}
+	if v := os.Getenv("TW2A_BALANCE_REFRESH_MINUTES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			c.Schedule.BalanceRefreshMin = n
 		}
 	}
 	if v := os.Getenv("TW2A_CHECKIN_JITTER_MINUTES"); v != "" {
