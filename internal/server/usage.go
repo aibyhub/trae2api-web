@@ -337,8 +337,10 @@ func (h *Handler) nicknameFor(uid string) string {
 	return ""
 }
 
-// drNonOfficialModels 非 Trae 官方模型的 config 条目（套餐/组合伪模型，无独立倍率）。
-var drNonOfficialModels = map[string]bool{"free-stack": true, "combo": true}
+// drNonOfficialModels 非 Trae 官方面向用户的 config 条目：套餐伪模型
+// （free-stack/combo，无独立倍率）与内部工具模型（summary = 会话标题生成）。
+// 上游 is_invisible_to_user 对它们不生效（字段缺失），按 id 显式剔除。
+var drNonOfficialModels = map[string]bool{"free-stack": true, "combo": true, "summary": true}
 
 // adminRatesGet GET /admin/api/rates：官方模型倍率表（get_detail_param
 // display_contact_config.consumption_rate，上游定义，只读）。

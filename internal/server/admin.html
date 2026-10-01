@@ -692,8 +692,8 @@ function renderRates(models){
     el.innerHTML = '<div class="muted" style="padding:14px">暂无模型数据（等模型列表从上游拉取）。</div>';
     return;
   }
-  const sorted = [...visible].sort((a,b)=>(b.rate||0)-(a.rate||0));
-  const rows = sorted.map(m=>{
+  // 后端已按倍率升序返回，这里不再重排
+  const rows = visible.map(m=>{
     const rateCls = (m.rate||0) >= 0.5 ? 'b-bad' : (m.rate||0) >= 0.2 ? 'b-warn' : 'b-ok';
     return '<tr>'
       + '<td class="mono">'+esc(m.id)+'</td>'
