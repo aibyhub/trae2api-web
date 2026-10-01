@@ -44,7 +44,8 @@ type Handler struct {
 	cfg Config
 	mux *http.ServeMux
 
-	usage *UsageStore // 使用日志（每笔模型请求）
+	usage   *UsageStore // 使用日志（每笔模型请求）
+	proxies *ProxyPool  // 代理池（账号按名称选用）
 
 	// Web 登录 pending 态：pendingID → 登录进行中的临时上下文。
 	// 回调 /authorize 捕获后标记成功；面板轮询 result 取结果。
@@ -79,10 +80,11 @@ func NewHandler(cfg Config) *Handler {
 		cfg.DataDir = "data"
 	}
 	h := &Handler{
-		cfg:    cfg,
-		mux:    http.NewServeMux(),
-		logins: map[string]*pendingLogin{},
-		usage:  NewUsageStore(filepath.Join(cfg.DataDir, "usage.jsonl")),
+		cfg:     cfg,
+		mux:     http.NewServeMux(),
+		logins:  map[string]*pendingLogin{},
+		usage:   NewUsageStore(filepath.Join(cfg.DataDir, "usage.jsonl")),
+		proxies: NewProxyPool(filepath.Join(cfg.DataDir, "proxies.json")),
 	}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
@@ -113,9 +115,13 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("POST /admin/api/checkin_all", h.withAdminAuth(h.adminCheckinAll))
 	h.mux.HandleFunc("POST /admin/api/refresh_all", h.withAdminAuth(h.adminRefreshAll))
 	h.mux.HandleFunc("POST /admin/api/accounts/{uid}/checkin", h.withAdminAuth(h.adminCheckinOne))
-	// 使用日志 + 官方模型倍率
+	// 使用日志 + 官方模型倍率 + 代理池
 	h.mux.HandleFunc("GET /admin/api/usage", h.adminUsage)
 	h.mux.HandleFunc("GET /admin/api/rates", h.adminRatesGet)
+	h.mux.HandleFunc("GET /admin/api/proxies", h.withAdminAuth(h.adminProxiesGet))
+	h.mux.HandleFunc("POST /admin/api/proxies", h.withAdminAuth(h.adminProxiesAdd))
+	h.mux.HandleFunc("DELETE /admin/api/proxies/{name}", h.withAdminAuth(h.adminProxiesDelete))
+	h.mux.HandleFunc("POST /admin/api/proxies/test", h.withAdminAuth(h.adminProxiesTest))
 	return h
 }
 

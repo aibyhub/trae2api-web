@@ -139,6 +139,19 @@ func (s *UsageStore) Recent(n int) []UsageEntry {
 	return out
 }
 
+// Since 返回 ts >= cutoff 的条目（时间升序）。
+func (s *UsageStore) Since(cutoff int64) []UsageEntry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]UsageEntry, 0, len(s.entries))
+	for _, e := range s.entries {
+		if e.TS >= cutoff {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 // UsageToday 今日（本地时区自然日）汇总。
 type UsageToday struct {
 	Requests         int     `json:"requests"`
@@ -198,33 +211,156 @@ func parseTokenUsage(m map[string]any) (prompt, completion, total int64) {
 // admin API
 // ---------------------------------------------------------------------------
 
-// adminUsage GET /admin/api/usage?limit=100：最近请求日志 + 今日汇总。
+// usageAgg 使用记录聚合行（按账号 / 按模型两个维度共用）。
+type usageAgg struct {
+	Key        string  `json:"key"`
+	Label      string  `json:"label,omitempty"`
+	Requests   int     `json:"requests"`
+	Fails      int     `json:"fails"`
+	Prompt     int64   `json:"prompt_tokens"`
+	Completion int64   `json:"completion_tokens"`
+	Total      int64   `json:"total_tokens"`
+	Cost       float64 `json:"cost"`
+	AvgLatency int64   `json:"avg_latency_ms"`
+	Rate       float64 `json:"rate,omitempty"`
+}
+
+// adminUsage GET /admin/api/usage?window=72&limit=300：
+// 时间窗（小时，0=全部）内的使用记录 + 总览 + 按账号 + 按模型聚合。
 func (h *Handler) adminUsage(w http.ResponseWriter, r *http.Request) {
-	limit := 100
+	window := 0
+	if v := r.URL.Query().Get("window"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			window = n
+		}
+	}
+	limit := 300
 	if v := r.URL.Query().Get("limit"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= usageMaxEntries {
 			limit = n
 		}
 	}
+	cutoff := int64(0)
+	if window > 0 {
+		cutoff = time.Now().Add(-time.Duration(window) * time.Hour).UnixMilli()
+	}
+	entries := h.usage.Since(cutoff)
+
+	totals := usageAgg{Key: "total"}
+	accAgg := map[string]*usageAgg{}
+	modelAgg := map[string]*usageAgg{}
+	for _, e := range entries {
+		totals.Requests++
+		totals.Prompt += e.PromptTokens
+		totals.Completion += e.CompletionTokens
+		totals.Total += e.TotalTokens
+		totals.Cost += e.Cost
+		totals.AvgLatency += e.DurationMs
+		if e.Status != "ok" {
+			totals.Fails++
+		}
+		acc, ok := accAgg[e.UID]
+		if !ok {
+			acc = &usageAgg{Key: e.UID}
+			accAgg[e.UID] = acc
+		}
+		acc.Requests++
+		acc.Prompt += e.PromptTokens
+		acc.Completion += e.CompletionTokens
+		acc.Total += e.TotalTokens
+		acc.Cost += e.Cost
+		acc.AvgLatency += e.DurationMs
+		if e.Status != "ok" {
+			acc.Fails++
+		}
+		mm, ok := modelAgg[e.Model]
+		if !ok {
+			mm = &usageAgg{Key: e.Model, Rate: e.Rate}
+			modelAgg[e.Model] = mm
+		}
+		mm.Requests++
+		mm.Prompt += e.PromptTokens
+		mm.Completion += e.CompletionTokens
+		mm.Total += e.TotalTokens
+		mm.Cost += e.Cost
+		mm.AvgLatency += e.DurationMs
+		if e.Status != "ok" {
+			mm.Fails++
+		}
+	}
+	finalize := func(a *usageAgg, n int) {
+		a.Cost = round2(a.Cost)
+		if n > 0 {
+			a.AvgLatency = a.AvgLatency / int64(n)
+		}
+	}
+	finalize(&totals, totals.Requests)
+	byAccount := make([]usageAgg, 0, len(accAgg))
+	for _, a := range accAgg {
+		finalize(a, a.Requests)
+		if nick := h.nicknameFor(a.Key); nick != "" {
+			a.Label = nick
+		}
+		byAccount = append(byAccount, *a)
+	}
+	sort.Slice(byAccount, func(i, j int) bool { return byAccount[i].Cost > byAccount[j].Cost })
+	byModel := make([]usageAgg, 0, len(modelAgg))
+	for _, m := range modelAgg {
+		finalize(m, m.Requests)
+		if m.Total > 0 {
+			m.Cost = round2(m.Cost)
+		}
+		byModel = append(byModel, *m)
+	}
+	sort.Slice(byModel, func(i, j int) bool { return byModel[i].Cost > byModel[j].Cost })
+
+	// 明细：窗口内最新在前，截断到 limit
+	recent := make([]UsageEntry, 0, len(entries))
+	for i := len(entries) - 1; i >= 0 && len(recent) < limit; i-- {
+		recent = append(recent, entries[i])
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"entries": h.usage.Recent(limit),
-		"today":   h.usage.Today(),
+		"window_hours": window,
+		"totals":       totals,
+		"by_account":   byAccount,
+		"by_model":     byModel,
+		"entries":      recent,
 	})
+}
+
+// nicknameFor 账号昵称（面板展示用）。
+func (h *Handler) nicknameFor(uid string) string {
+	if a := h.cfg.Pool.AuthByUID(uid); a != nil {
+		return a.Nickname
+	}
+	return ""
 }
 
 // adminRatesGet GET /admin/api/rates：官方模型倍率表（get_detail_param
 // display_contact_config.consumption_rate，上游定义，只读）。
+// 只列 Trae 自带模型：剔除自定义占位（is_custom_model）与内部模型
+// （is_invisible_to_user，如 subagent）；按倍率升序（未知倍率垫底）。
 func (h *Handler) adminRatesGet(w http.ResponseWriter, r *http.Request) {
 	infos := h.fetchDynamicModels()
 	out := make([]map[string]any, 0, len(infos))
 	for _, mi := range infos {
+		if mi.Custom || mi.Invisible {
+			continue
+		}
 		out = append(out, map[string]any{
-			"id":            mi.ID,
-			"name":          mi.Name,
-			"rate":          mi.Rate,
-			"fee_level":     mi.FeeLevel,
+			"id":             mi.ID,
+			"name":           mi.Name,
+			"rate":           mi.Rate,
+			"fee_level":      mi.FeeLevel,
 			"context_length": mi.ContextWindow,
 		})
 	}
+	sort.SliceStable(out, func(i, j int) bool {
+		ri, rj := out[i]["rate"].(float64), out[j]["rate"].(float64)
+		if (ri > 0) != (rj > 0) {
+			return ri > 0 // 有倍率的在前
+		}
+		return ri < rj // 升序
+	})
 	writeJSON(w, http.StatusOK, map[string]any{"models": out, "fetched_from": "upstream get_detail_param"})
 }

@@ -148,8 +148,9 @@
   <div class="tabs">
     <div class="tab active" onclick="switchTab('accounts',this)">账号管理</div>
     <div class="tab" onclick="switchTab('credits',this)">额度监控</div>
-    <div class="tab" onclick="switchTab('usage',this)">使用日志</div>
+    <div class="tab" onclick="switchTab('usage',this)">使用记录</div>
     <div class="tab" onclick="switchTab('rates',this)">官方倍率</div>
+    <div class="tab" onclick="switchTab('proxies',this)">代理池</div>
   </div>
 
   <!-- 账号管理 -->
@@ -186,29 +187,51 @@
     <div class="grid" id="grid"><div class="muted"><span class="spin"></span> 加载中...</div></div>
   </div>
 
-  <!-- 使用日志 -->
+  <!-- 使用记录 -->
   <div id="pane-usage" class="pane">
-    <div class="stats" id="usageStats"></div>
-    <div class="imp-row" style="margin-bottom:12px">
-      <select id="usageLimit" class="btn" onchange="loadUsage()" style="padding:6px 10px">
-        <option value="50">最近 50 条</option>
-        <option value="100" selected>最近 100 条</option>
-        <option value="300">最近 300 条</option>
+    <div class="panel" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <select id="usageWindow" class="btn" onchange="loadUsage()" style="padding:6px 10px">
+        <option value="24">近 24 小时</option>
+        <option value="72" selected>近 3 天</option>
+        <option value="168">近 7 天</option>
+        <option value="720">近 30 天</option>
+        <option value="0">全部历史</option>
       </select>
       <label class="muted" style="display:flex;align-items:center;gap:6px">
         <input type="checkbox" id="usageAuto" onchange="toggleUsageAuto()"> 每 10 秒自动刷新
       </label>
-      <span class="muted">消耗 = total_tokens × 官方倍率（相对估算；真实扣分以积分余额/权益包为准）</span>
+      <span class="muted">按账号区分 · 消耗 = tokens × 官方倍率（相对估算，真实扣分以积分余额为准）</span>
     </div>
-    <div id="usageTable" class="tblwrap"><div class="muted" style="padding:14px"><span class="spin"></span> 加载中...</div></div>
+    <div class="stats" id="usageStats"></div>
+    <div class="panel"><h2>按账号</h2><div id="usageByAcc"><div class="muted" style="padding:14px"><span class="spin"></span> 加载中...</div></div></div>
+    <div class="panel"><h2>按模型</h2><div id="usageByModel"><div class="muted" style="padding:14px"></div></div></div>
+    <div class="panel"><h2>使用明细<small style="color:var(--dim);font-weight:400;margin-left:8px">按账号分组，最新在前</small></h2><div id="usageGroups"><div class="muted" style="padding:14px"></div></div></div>
   </div>
 
   <!-- 官方倍率 -->
   <div id="pane-rates" class="pane">
     <div class="panel">
-      <span class="muted">以下倍率由上游定义（get_detail_param → display_contact_config.consumption_rate），与 TRAE 客户端同源、只读，随上游更新。使用日志的「消耗」= tokens × 官方倍率。</span>
+      <span class="muted">只列 <b>TRAE 自带模型</b>（自定义占位与内部 subagent 已剔除），倍率由上游定义（get_detail_param → consumption_rate）、随上游实时更新，按倍率<b>升序</b>。使用记录的「消耗」= tokens × 官方倍率。</span>
     </div>
     <div id="ratesTable" class="tblwrap"><div class="muted" style="padding:14px"><span class="spin"></span> 加载中...</div></div>
+  </div>
+
+  <!-- 代理池 -->
+  <div id="pane-proxies" class="pane">
+    <div class="panel">
+      <h2>添加代理</h2>
+      <div class="imp-row">
+        <input id="pxName" class="imp" style="min-height:0;width:180px;padding:8px 10px" placeholder="名称，如 住宅-01">
+        <input id="pxURL" class="imp" style="min-height:0;flex:1;padding:8px 10px" placeholder="socks5://user:pass@1.2.3.4:1080 或 http://5.6.7.8:8080">
+        <button class="btn" onclick="testPoolProxyForm()">测试</button>
+        <button class="btn primary" onclick="addProxy()">添加</button>
+      </div>
+      <span id="pxStatus" class="status-line" style="display:none"></span>
+    </div>
+    <div id="proxyPoolTable" class="tblwrap"><div class="muted" style="padding:14px"><span class="spin"></span> 加载中...</div></div>
+    <div class="panel" style="margin-top:14px">
+      <span class="muted">说明：账号在「代理」弹窗里从池中选择出口；<b>导入新账号时若未指定出口，自动均衡分配</b>占用最少的代理。凭据仅存服务器 data/proxies.json，面板不回显明文。建议不同账号使用不同出口 IP。</span>
+    </div>
   </div>
 </div>
 
@@ -266,6 +289,7 @@ function refreshActive(){
   else if(activeTab==='credits') loadCredits();
   else if(activeTab==='usage') loadUsage();
   else if(activeTab==='rates') loadRates();
+  else if(activeTab==='proxies') loadProxies();
 }
 function toggleUsageAuto(){
   const on = activeTab==='usage' && document.getElementById('usageAuto').checked;
@@ -561,52 +585,91 @@ async function loadCredits(){
   }
 }
 
-/* ─── 使用日志 ─── */
+/* ─── 使用记录（按账号区分，workbuddy 式聚合） ─── */
 async function loadUsage(){
   try{
-    const limit = document.getElementById('usageLimit').value || 100;
-    const r = await fetch('/admin/api/usage?limit='+limit, {cache:'no-store'});
+    const w = document.getElementById('usageWindow').value;
+    const r = await fetch('/admin/api/usage?window='+w, {cache:'no-store'});
     const d = await r.json();
     renderUsage(d);
     document.getElementById('ts').textContent = '更新于 ' + new Date().toLocaleTimeString();
   }catch(e){
-    document.getElementById('usageTable').innerHTML = '<div style="color:var(--bad);padding:14px">加载失败：'+esc(e.message)+'</div>';
+    document.getElementById('usageStats').innerHTML = '<div style="color:var(--bad)">加载失败：'+esc(e.message)+'</div>';
   }
 }
 function renderUsage(d){
-  const t = d.today || {};
+  const t = d.totals || {};
   document.getElementById('usageStats').innerHTML =
-    '<div class="stat"><div class="v">'+fmt(t.requests)+'</div><div class="k">今日请求</div></div>'
-    + '<div class="stat"><div class="v">'+fmt(t.prompt_tokens)+'</div><div class="k">今日输入 tokens</div></div>'
-    + '<div class="stat"><div class="v">'+fmt(t.completion_tokens)+'</div><div class="k">今日输出 tokens</div></div>'
-    + '<div class="stat"><div class="v">'+fmt2(t.cost)+'</div><div class="k">今日估算消耗</div></div>';
+    '<div class="stat"><div class="v">'+fmt(t.requests)+'</div><div class="k">请求'+(d.window_hours?'（近 '+d.window_hours+'h）':'（全部）')+'</div></div>'
+    + '<div class="stat"><div class="v" style="color:'+(t.fails?'var(--bad)':'inherit')+'">'+fmt(t.fails)+'</div><div class="k">失败</div></div>'
+    + '<div class="stat"><div class="v">'+fmt(t.prompt_tokens)+'</div><div class="k">输入 tokens</div></div>'
+    + '<div class="stat"><div class="v">'+fmt(t.completion_tokens)+'</div><div class="k">输出 tokens</div></div>'
+    + '<div class="stat"><div class="v">'+fmt2(t.cost)+'</div><div class="k">估算消耗</div></div>';
+  // 按账号
+  const accs = d.by_account || [];
+  document.getElementById('usageByAcc').innerHTML = !accs.length
+    ? '<div class="muted" style="padding:14px">该时间窗内暂无请求记录。</div>'
+    : '<table class="accts"><thead><tr><th>账号</th><th class="num">请求</th><th class="num">失败</th>'
+      +'<th class="num">输入</th><th class="num">输出</th><th class="num">合计</th><th class="num">估算消耗</th><th class="num">均延迟</th></tr></thead><tbody>'
+      + accs.map(a=>'<tr>'
+        + '<td><div class="nick">'+esc(a.label||'(未命名)')+'</div><div class="uid mono">'+esc(a.key)+'</div></td>'
+        + '<td class="mono num">'+fmt(a.requests)+'</td>'
+        + '<td class="mono num">'+(a.fails?'<span class="log-err">'+fmt(a.fails)+'</span>':'0')+'</td>'
+        + '<td class="mono num">'+fmt(a.prompt_tokens)+'</td>'
+        + '<td class="mono num">'+fmt(a.completion_tokens)+'</td>'
+        + '<td class="mono num">'+fmt(a.total_tokens)+'</td>'
+        + '<td class="mono num">'+fmt2(a.cost)+'</td>'
+        + '<td class="mono num">'+fmt(a.avg_latency_ms)+'ms</td>'
+        + '</tr>').join('') + '</tbody></table>';
+  // 按模型
+  const models = d.by_model || [];
+  document.getElementById('usageByModel').innerHTML = !models.length
+    ? '<div class="muted" style="padding:14px"></div>'
+    : '<table class="accts"><thead><tr><th>模型</th><th class="num">官方倍率</th><th class="num">请求</th>'
+      +'<th class="num">输入</th><th class="num">输出</th><th class="num">合计</th><th class="num">估算消耗</th><th class="num">每 1M tokens</th></tr></thead><tbody>'
+      + models.map(m=>{
+          const per1m = m.total_tokens>0 ? fmt2(m.cost/(m.total_tokens/1000000)) : '-';
+          return '<tr>'
+        + '<td class="mono">'+esc(m.key)+'</td>'
+        + '<td class="mono num">'+fmt2(m.rate)+'</td>'
+        + '<td class="mono num">'+fmt(m.requests)+'</td>'
+        + '<td class="mono num">'+fmt(m.prompt_tokens)+'</td>'
+        + '<td class="mono num">'+fmt(m.completion_tokens)+'</td>'
+        + '<td class="mono num">'+fmt(m.total_tokens)+'</td>'
+        + '<td class="mono num">'+fmt2(m.cost)+'</td>'
+        + '<td class="mono num">'+per1m+'</td>'
+        + '</tr>';}).join('') + '</tbody></table>';
+  // 明细：按账号分组
+  const groups = document.getElementById('usageGroups');
   const es = d.entries || [];
-  const el = document.getElementById('usageTable');
-  if(!es.length){
-    el.innerHTML = '<div class="muted" style="padding:14px">暂无请求记录 —— 发一次 /v1/chat/completions 后这里会出现日志。</div>';
-    return;
-  }
-  const rows = es.map(e=>{
-    const st = e.status==='ok' ? '<span class="log-ok">成功</span>' : '<span class="log-err" title="'+esc(e.error||'')+'">失败</span>';
-    const timeStr = new Date(e.ts).toLocaleString();
-    return '<tr>'
-      + '<td class="mono">'+esc(timeStr)+'</td>'
-      + '<td class="mono">'+esc(e.uid ? e.uid.slice(0,8) : '-')+'</td>'
-      + '<td class="mono">'+esc(e.model||'-')+(e.stream?' <span class="muted">流</span>':'')+'</td>'
-      + '<td class="mono num">'+fmt(e.prompt_tokens)+'</td>'
-      + '<td class="mono num">'+fmt(e.completion_tokens)+'</td>'
-      + '<td class="mono num">'+fmt(e.total_tokens)+'</td>'
-      + '<td class="mono num">'+fmt2(e.rate)+'</td>'
-      + '<td class="mono num">'+fmt2(e.cost)+'</td>'
-      + '<td class="mono num">'+fmt(e.duration_ms)+'ms</td>'
-      + '<td>'+st+(e.error?'<div class="mono" style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(e.error)+'">'+esc(e.error)+'</div>':'')+'</td>'
-      + '</tr>';
+  if(!es.length){ groups.innerHTML = '<div class="muted" style="padding:14px"></div>'; return; }
+  const byUid = {};
+  es.forEach(e=>{ (byUid[e.uid||'-'] = byUid[e.uid||'-'] || []).push(e); });
+  const accOrder = accs.map(a=>a.key).filter(k=>byUid[k]);
+  Object.keys(byUid).forEach(k=>{ if(!accOrder.includes(k)) accOrder.push(k); });
+  groups.innerHTML = accOrder.map(uid=>{
+    const list = byUid[uid];
+    const meta = accs.find(a=>a.key===uid) || {};
+    const rows = list.map(e=>{
+      const st = e.status==='ok' ? '<span class="log-ok">成功</span>' : '<span class="log-err" title="'+esc(e.error||'')+'">失败</span>';
+      return '<tr>'
+        + '<td class="mono">'+esc(new Date(e.ts).toLocaleString())+'</td>'
+        + '<td class="mono">'+esc(e.model||'-')+(e.stream?' <span class="muted">流</span>':'')+'</td>'
+        + '<td class="mono num">'+fmt(e.prompt_tokens)+'</td>'
+        + '<td class="mono num">'+fmt(e.completion_tokens)+'</td>'
+        + '<td class="mono num">'+fmt(e.total_tokens)+'</td>'
+        + '<td class="mono num">'+fmt2(e.cost)+'</td>'
+        + '<td class="mono num">'+fmt(e.duration_ms)+'ms</td>'
+        + '<td>'+st+(e.error?'<div class="mono" style="max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(e.error)+'">'+esc(e.error)+'</div>':'')+'</td>'
+        + '</tr>';
+    }).join('');
+    return '<div class="panel" style="margin-bottom:14px"><h2>'+esc(meta.label||'(已删除账号)')+
+      '<small style="color:var(--dim);font-weight:400;margin-left:8px" class="mono">'+esc(uid)+'</small></h2>'
+      + '<div class="tblwrap"><table class="accts"><thead><tr>'
+      + '<th>时间</th><th>模型</th><th class="num">输入</th><th class="num">输出</th><th class="num">合计</th>'
+      + '<th class="num">消耗</th><th class="num">耗时</th><th>状态</th>'
+      + '</tr></thead><tbody>'+rows+'</tbody></table></div></div>';
   }).join('');
-  el.innerHTML = '<table class="accts"><thead><tr>'
-    + '<th>时间</th><th>账号</th><th>模型</th><th style="text-align:right">输入</th><th style="text-align:right">输出</th>'
-    + '<th style="text-align:right">合计</th><th style="text-align:right">倍率</th><th style="text-align:right">消耗</th>'
-    + '<th style="text-align:right">耗时</th><th>状态</th>'
-    + '</tr></thead><tbody>'+rows+'</tbody></table>';
 }
 
 /* ─── 官方倍率（上游定义，只读） ─── */
@@ -642,28 +705,44 @@ function renderRates(models){
     + '</tr></thead><tbody>'+rows+'</tbody></table>';
 }
 
-/* ─── 账号代理 ─── */
-function showProxy(uid){
+/* ─── 账号代理（从代理池选用） ─── */
+async function showProxy(uid){
   const a = (window._lastAccounts||[]).find(x=>x.uid===uid) || {};
+  let pool = [];
+  try{
+    pool = (await fetch('/admin/api/proxies', {headers: authHeader(), cache:'no-store'}).then(r=>r.json())).proxies || [];
+  }catch(e){ /* 池读取失败也能用自定义 */ }
+  // 当前出口若是池内地址（脱敏形态一致）→ 预选；否则展示为自定义
+  const cur = a.proxy || '';
+  const matched = pool.find(p=>p.url_masked === cur);
+  const options = '<option value="">直连（不使用代理）</option>'
+    + pool.map(p=>'<option value="'+esc(p.name)+'"'+(matched&&matched.name===p.name?' selected':'')+'>'+esc(p.name)+'（'+esc(p.url_masked)+'）</option>').join('');
   showModal('出口代理 — '+(a.nickname||uid),
-    '<div class="muted" style="margin-bottom:10px">为该账号配置独立代理出口（http/https/socks5），让不同账号走不同 IP，降低同 IP 多账号的风控关联。留空 = 直连（或全局 TW2A_PROXY_URL）。修改后对新请求生效。</div>'
-    + '<input id="proxyInput" class="imp" style="min-height:0;padding:8px 10px" placeholder="如 socks5://user:pass@1.2.3.4:1080 或 http://5.6.7.8:8080" value="'+esc(a.proxy||'')+'">'
+    '<div class="muted" style="margin-bottom:10px">从代理池选择该账号的出口 IP（不同账号选不同代理，降低风控关联）。新代理在「代理池」页添加。当前出口：<b>'+(cur?esc(cur):'直连')+'</b></div>'
+    + '<select id="proxySel" class="imp" style="min-height:0;padding:8px 10px" onchange="document.getElementById(\'proxyCustomWrap\').style.display=this.value===\'__custom__\'?\'\':\'none\'">'
+    + options + '<option value="__custom__"'+(!matched&&cur?' selected':'')+'>自定义地址…</option></select>'
+    + '<div id="proxyCustomWrap" style="margin-top:8px;'+(matched||!cur?'display:none':'')+'">'
+    + '<input id="proxyCustom" class="imp" style="min-height:0;padding:8px 10px" placeholder="socks5://user:pass@1.2.3.4:1080"'+(!matched&&cur?' value="当前 '+esc(cur)+'，输入新地址覆盖"':'')+'>'
+    + '</div>'
     + '<div class="imp-row"><button class="btn primary" onclick="saveProxy(\''+esc(uid)+'\')">保存</button>'
-    + '<button class="btn" onclick="testProxy(\''+esc(uid)+'\')">测试连通</button>'
+    + '<button class="btn" onclick="testProxy(\''+esc(uid)+'\')">用该账号测试连通</button>'
     + '<span id="proxyStatus" class="status-line" style="display:none;margin:0"></span></div>');
 }
 async function saveProxy(uid){
-  const v = document.getElementById('proxyInput').value.trim();
+  const sel = document.getElementById('proxySel').value;
+  const custom = (document.getElementById('proxyCustom')||{}).value || '';
+  const v = sel === '__custom__' ? custom.trim() : sel;
+  if(sel === '__custom__' && !v){ const st=document.getElementById('proxyStatus'); st.style.display=''; st.className='status-line err'; st.textContent='请输入自定义代理地址'; return; }
   const st = document.getElementById('proxyStatus');
   st.style.display=''; st.className='status-line'; st.textContent='保存中...';
   try{
     const r = await fetch('/admin/api/accounts/'+encodeURIComponent(uid), {
       method:'PATCH', headers:{'Content-Type':'application/json', ...authHeader()},
-      body: JSON.stringify({proxy_url: v})
+      body: JSON.stringify({proxy: v})
     });
     const d = await r.json();
     if(!r.ok){ st.className='status-line err'; st.textContent='保存失败：'+apiErr(d); return; }
-    st.className='status-line ok'; st.textContent='已保存';
+    st.className='status-line ok'; st.textContent='已保存（对新请求生效）';
     loadAccounts();
   }catch(e){ st.className='status-line err'; st.textContent='保存失败：'+e.message; }
 }
@@ -676,6 +755,69 @@ async function testProxy(uid){
     if(d.ok){ st.className='status-line ok'; st.textContent='连通正常：'+(d.latency_ms)+'ms，剩余 '+fmt(d.remain)+' 积分（代理 '+(d.proxy||'直连')+'）'; }
     else { st.className='status-line err'; st.textContent='失败：'+(d.error||'未知')+'（代理 '+(d.proxy||'直连')+'，'+(d.latency_ms||'?')+'ms）'; }
   }catch(e){ st.className='status-line err'; st.textContent='测试失败：'+e.message; }
+}
+
+/* ─── 代理池 ─── */
+async function loadProxies(){
+  try{
+    const d = await fetch('/admin/api/proxies', {headers: authHeader(), cache:'no-store'}).then(r=>r.json());
+    const list = d.proxies || [];
+    document.getElementById('proxyPoolTable').innerHTML = !list.length
+      ? '<div class="muted" style="padding:14px">代理池为空 —— 在上方添加代理后，账号即可从下拉里选用。</div>'
+      : '<table class="accts"><thead><tr><th>名称</th><th>地址</th><th style="text-align:right">操作</th></tr></thead><tbody>'
+        + list.map(p=>'<tr><td class="nick">'+esc(p.name)+'</td><td class="mono">'+esc(p.url_masked)+'</td>'
+          + '<td><div class="row-actions"><button class="btn sm" onclick="testPoolProxy(\''+esc(p.name)+'\',\''+esc(p.url_masked)+'\')">测试</button>'
+          + '<button class="btn sm danger" onclick="deleteProxy(\''+esc(p.name)+'\')">删除</button></div></td></tr>').join('')
+        + '</tbody></table>';
+  }catch(e){
+    document.getElementById('proxyPoolTable').innerHTML = '<div style="color:var(--bad);padding:14px">加载失败（需要 API Key）：'+esc(e.message)+'</div>';
+  }
+}
+function pxStatus(cls, text){
+  const st = document.getElementById('pxStatus');
+  st.style.display=''; st.className='status-line'+(cls?' '+cls:''); st.textContent=text;
+}
+async function addProxy(){
+  const name = document.getElementById('pxName').value.trim();
+  const u = document.getElementById('pxURL').value.trim();
+  if(!name || !u){ pxStatus('err','名称和地址都要填'); return; }
+  pxStatus('','添加中...');
+  try{
+    const r = await fetch('/admin/api/proxies', {method:'POST', headers:{'Content-Type':'application/json', ...authHeader()}, body: JSON.stringify({name, url:u})});
+    const d = await r.json();
+    if(!r.ok){ pxStatus('err','添加失败：'+apiErr(d)); return; }
+    pxStatus('ok','已添加：'+name);
+    document.getElementById('pxName').value=''; document.getElementById('pxURL').value='';
+    loadProxies();
+  }catch(e){ pxStatus('err','添加失败：'+e.message); }
+}
+async function deleteProxy(name){
+  if(!confirm('从代理池删除 '+name+'？（已选用它的账号不受影响，仍继续用原地址）')) return;
+  try{
+    const r = await fetch('/admin/api/proxies/'+encodeURIComponent(name), {method:'DELETE', headers: authHeader()});
+    if(!r.ok){ const d = await r.json().catch(()=>({})); alert('删除失败：'+apiErr(d)); }
+    loadProxies();
+  }catch(e){ alert('删除失败：'+e.message); }
+}
+async function testPoolProxyForm(){
+  const u = document.getElementById('pxURL').value.trim();
+  if(!u){ pxStatus('err','先填地址再测试'); return; }
+  pxStatus('','测试中...');
+  try{
+    const r = await fetch('/admin/api/proxies/test', {method:'POST', headers:{'Content-Type':'application/json', ...authHeader()}, body: JSON.stringify({url:u})});
+    const d = await r.json();
+    if(d.ok){ pxStatus('ok','连通正常：HTTP '+d.status+'，'+d.latency_ms+'ms'); }
+    else { pxStatus('err','失败：'+(d.error||('HTTP '+d.status))+'，'+(d.latency_ms||'?')+'ms'); }
+  }catch(e){ pxStatus('err','测试失败：'+e.message); }
+}
+async function testPoolProxy(name){
+  pxStatus('','测试中：'+name+' ...');
+  try{
+    const r = await fetch('/admin/api/proxies/test', {method:'POST', headers:{'Content-Type':'application/json', ...authHeader()}, body: JSON.stringify({name})});
+    const d = await r.json();
+    if(d.ok){ pxStatus('ok','连通正常：'+name+' — HTTP '+d.status+'，'+d.latency_ms+'ms'); }
+    else { pxStatus('err','失败：'+name+' — '+(d.error||('HTTP '+d.status))+'，'+(d.latency_ms||'?')+'ms'); }
+  }catch(e){ pxStatus('err','测试失败：'+e.message); }
 }
 /* ─── 设备重注册（修复 claim 9074「设备未注册」） ─── */
 async function registerDevice(uid){

@@ -337,6 +337,8 @@ type ModelInfo struct {
 	MaxTokens     int64   // = maxOutputTokens
 	Rate          float64 // 官方消耗倍率（display_contact_config.consumption_rate.data.rate），0 = 上游未下发
 	FeeLevel      int     // display_config.fee_model_level
+	Custom        bool    // is_custom_model：客户端自定义模型占位
+	Invisible     bool    // is_invisible_to_user：内部模型（subagent 等），客户端模型列表不展示
 }
 
 // FetchModels 拉 SOLO 模型表（get_detail_param，32 配置）。
@@ -363,6 +365,8 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 	var resp struct {
 		ConfigInfoList []struct {
 			ConfigName    string `json:"config_name"`
+			IsCustomModel bool   `json:"is_custom_model"`
+			Invisible     bool   `json:"is_invisible_to_user"`
 			DisplayConfig struct {
 				DisplayName   string `json:"display_name"`
 				FeeModelLevel int    `json:"fee_model_level"`
@@ -402,6 +406,8 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 			Name:     cfg.DisplayConfig.DisplayName,
 			Rate:     rate,
 			FeeLevel: cfg.DisplayConfig.FeeModelLevel,
+			Custom:   cfg.IsCustomModel,
+			Invisible: cfg.Invisible,
 		})
 	}
 	if len(out) == 0 {

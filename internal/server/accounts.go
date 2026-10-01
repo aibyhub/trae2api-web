@@ -256,6 +256,8 @@ func (h *Handler) importFromJSON(req importRequest) (*auth.Auth, error) {
 			return nil, fmt.Errorf("proxy_url 需为 http/https/socks5 代理地址")
 		}
 		a.ProxyURL = strings.TrimSpace(req.ProxyURL)
+	} else if a.ProxyURL == "" {
+		h.autoAssignProxy(a) // 未指定出口时从代理池自动均衡分配
 	}
 	// 缺省 host/domain 补默认
 	if a.Domain == "" {
@@ -316,7 +318,8 @@ func (h *Handler) adminDeleteAccount(w http.ResponseWriter, r *http.Request) {
 type patchRequest struct {
 	Enabled  *bool   `json:"enabled,omitempty"`
 	Nickname *string `json:"nickname,omitempty"`
-	ProxyURL *string `json:"proxy_url,omitempty"` // "" = 清除（直连/全局兜底）
+	ProxyURL *string `json:"proxy_url,omitempty"` // 原始地址（API 兼容）；"" = 清除
+	Proxy    *string `json:"proxy,omitempty"`     // 代理池名称 / 原始地址 / "" = 清除（面板用）
 }
 
 // adminPatchAccount PATCH /admin/api/accounts/{uid}：软开关 / nickname。
@@ -377,6 +380,36 @@ func (h *Handler) adminPatchAccount(w http.ResponseWriter, r *http.Request) {
 		}
 		log.Printf("proxy updated uid=%s -> %s", uid, maskProxy(p))
 	}
+	if req.Proxy != nil {
+		// 面板路径：值可为代理池名称、原始代理地址或 ""（直连）。
+		v := strings.TrimSpace(*req.Proxy)
+		resolved := ""
+		if v != "" {
+			if u, ok := h.proxies.Resolve(v); ok {
+				resolved = u
+			} else if validProxyURL(v) {
+				resolved = v
+			} else {
+				writeOpenAIError(w, http.StatusBadRequest, "invalid_request",
+					"代理不存在（代理池里没有 "+v+"）且不是合法代理地址")
+				return
+			}
+		}
+		a := h.cfg.Pool.AuthByUID(uid)
+		if a == nil {
+			writeOpenAIError(w, http.StatusNotFound, "not_found", "no auth for uid")
+			return
+		}
+		a.ProxyURL = resolved
+		if a.FilePath == "" {
+			a.FilePath = auth.FilePathFor(h.cfg.AuthDir, uid)
+		}
+		if err := a.SaveAtomic(); err != nil {
+			writeOpenAIError(w, http.StatusInternalServerError, "save_failed", err.Error())
+			return
+		}
+		log.Printf("proxy updated uid=%s -> %s", uid, maskProxy(resolved))
+	}
 	st2, _ := h.cfg.Pool.Status(uid)
 	writeJSON(w, http.StatusOK, st2)
 }
@@ -407,6 +440,24 @@ func maskProxy(s string) string {
 		return u.Scheme + "://***@" + u.Host
 	}
 	return u.Scheme + "://" + u.Host
+}
+
+// autoAssignProxy 未显式指定出口时，从代理池挑被占用最少的地址分配给账号
+// （新账号自动均衡，避免都挤在同一个出口）。空池不动作。
+func (h *Handler) autoAssignProxy(a *auth.Auth) {
+	if a.ProxyURL != "" {
+		return
+	}
+	inUse := map[string]int{}
+	for _, st := range h.cfg.Pool.List() {
+		if x := h.cfg.Pool.AuthByUID(st.UID); x != nil && x.ProxyURL != "" {
+			inUse[x.ProxyURL]++
+		}
+	}
+	if u, ok := h.proxies.LeastUsed(inUse); ok {
+		a.ProxyURL = u
+		log.Printf("import: uid=%s 自动分配代理出口 %s", a.UID, maskProxy(u))
+	}
 }
 
 // adminRegisterDevice POST /admin/api/accounts/{uid}/device_register：
