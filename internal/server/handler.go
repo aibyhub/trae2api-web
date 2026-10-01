@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +24,7 @@ type Config struct {
 	Upstream     *upstream.Client
 	APIKey       string        // 空 = 不鉴权
 	AuthDir      string        // auths/ 目录，用于 import/delete 落盘 trae-*.json
+	DataDir      string        // data/ 目录：使用日志 + 模型倍率落盘；空 = "data"
 	MaxRotate    int           // 单请求最多换号次数，默认 3
 	PlanCooldown time.Duration // 1005 冷却，默认 12h
 	SoftCooldown time.Duration // 429 冷却，默认 60s
@@ -41,6 +43,9 @@ const maxBodyBytes = 8 << 20
 type Handler struct {
 	cfg Config
 	mux *http.ServeMux
+
+	usage *UsageStore // 使用日志（每笔模型请求）
+	rates *RateStore  // 模型倍率
 
 	// Web 登录 pending 态：pendingID → 登录进行中的临时上下文。
 	// 回调 /authorize 捕获后标记成功；面板轮询 result 取结果。
@@ -71,7 +76,16 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.DefaultModel == "" {
 		cfg.DefaultModel = upstream.DefaultConfigName
 	}
-	h := &Handler{cfg: cfg, mux: http.NewServeMux(), logins: map[string]*pendingLogin{}}
+	if cfg.DataDir == "" {
+		cfg.DataDir = "data"
+	}
+	h := &Handler{
+		cfg:   cfg,
+		mux:   http.NewServeMux(),
+		logins: map[string]*pendingLogin{},
+		usage: NewUsageStore(filepath.Join(cfg.DataDir, "usage.jsonl")),
+		rates: NewRateStore(filepath.Join(cfg.DataDir, "model_rates.json")),
+	}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
@@ -99,6 +113,10 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("POST /admin/api/checkin_all", h.withAdminAuth(h.adminCheckinAll))
 	h.mux.HandleFunc("POST /admin/api/refresh_all", h.withAdminAuth(h.adminRefreshAll))
 	h.mux.HandleFunc("POST /admin/api/accounts/{uid}/checkin", h.withAdminAuth(h.adminCheckinOne))
+	// 使用日志 + 模型倍率
+	h.mux.HandleFunc("GET /admin/api/usage", h.adminUsage)
+	h.mux.HandleFunc("GET /admin/api/rates", h.adminRatesGet)
+	h.mux.HandleFunc("PUT /admin/api/rates", h.withAdminAuth(h.adminRatesPut))
 	return h
 }
 
@@ -366,6 +384,29 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	body = setModelInBody(body, configName)
 
+	// 使用日志：每笔请求一条（成功/失败都记），倍率 → 估算消耗
+	start := time.Now()
+	rate := h.rates.Get(configName)
+	var recUID string
+	var recUsage map[string]any
+	record := func(status, errMsg string) {
+		p, comp, total := parseTokenUsage(recUsage)
+		h.usage.Add(UsageEntry{
+			TS:               time.Now().UnixMilli(),
+			UID:              recUID,
+			Model:            configName,
+			Stream:           peek.Stream,
+			Status:           status,
+			Error:            errMsg,
+			PromptTokens:     p,
+			CompletionTokens: comp,
+			TotalTokens:      total,
+			Rate:             rate,
+			Cost:             round2(float64(total) * rate),
+			DurationMs:       time.Since(start).Milliseconds(),
+		})
+	}
+
 	tried := map[string]bool{}
 	var lastErr error
 	for i := 0; i < h.cfg.MaxRotate; i++ {
@@ -374,6 +415,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		tried[acct.UID] = true
+		recUID = acct.UID
 
 		// token 临近过期 → 先 refresh（持锁重查，避免并发重复轮换；失败冷却换号）
 		refreshed, err := h.cfg.Upstream.RefreshTokenIfNeeded(acct, h.cfg.RefreshSkew)
@@ -426,10 +468,17 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if peek.Stream {
 			h.cfg.Pool.NoteSuccess(acct.UID)
 			// 流内业务错误（1005 plan/5xx 等）→ 冷却账号，错误信息注入 SSE。
-			_ = upstream.StreamWithError(w, rc, func(se *upstream.SOLOStreamError) {
+			var streamErrMsg string
+			_ = upstream.StreamWithErrorUsage(w, rc, func(se *upstream.SOLOStreamError) {
 				h.handleStreamError(acct.UID, se)
-			})
+				streamErrMsg = fmt.Sprintf("code=%d %s", se.Code, se.Msg)
+			}, func(m map[string]any) { recUsage = m })
 			rc.Close()
+			if streamErrMsg != "" {
+				record("error", streamErrMsg)
+			} else {
+				record("ok", "")
+			}
 			return
 		}
 		resp, err := upstream.Aggregate(rc)
@@ -451,6 +500,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.cfg.Pool.NoteSuccess(acct.UID)
+		if u, ok := resp["usage"].(map[string]any); ok {
+			recUsage = u
+		}
+		record("ok", "")
 		writeJSON(w, http.StatusOK, resp)
 		return
 	}
@@ -458,6 +511,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	if lastErr != nil {
 		msg += ": " + lastErr.Error()
 	}
+	record("error", msg)
 	writeOpenAIError(w, http.StatusServiceUnavailable, "no_healthy_account", msg)
 }
 

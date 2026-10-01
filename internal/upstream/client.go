@@ -476,22 +476,37 @@ func (c *Client) UserEntUsage(a *auth.Auth) (remain int64, err error) {
 	return remain, err
 }
 
-// EntUsage 查询账号额度明细（积分总量/已用/剩余/权益包数）。
-// remain = limit - used，usage.credits_amount 是已用积分（实测）。
-func (c *Client) EntUsage(a *auth.Auth) (remain, limit, used int64, packs int, err error) {
+// EntPack 单个权益包明细（面板展示：名称/额度/已用/过期时间）。
+type EntPack struct {
+	Name     string `json:"name"`      // display_desc，如「签到奖励」
+	Group    string `json:"group"`     // group_name，如「每日签到」
+	Limit    int64  `json:"limit"`
+	Used     int64  `json:"used"`
+	ExpireAt int64  `json:"expire_at"` // unix 秒；0 = 未知
+	Status   int    `json:"status"`
+}
+
+// EntUsageDetail 查询权益包全量明细（含过期时间；实测字段 display_desc /
+// group_name / expire_time（unix 秒）/ entitlement_base_info.quota.credits_limit /
+// usage.credits_amount）。remain = Σ(limit-used)，仅统计 limit>0 的包。
+func (c *Client) EntUsageDetail(a *auth.Auth) (packs []EntPack, remain, limit, used int64, err error) {
 	// 请求体对齐真实客户端（main.js pb()）：{require_usage:true, req_source:2}
 	req, err := http.NewRequest(http.MethodPost, c.ugBase()+EpEntUsage,
 		bytes.NewReader([]byte(`{"require_usage":true,"req_source":2}`)))
 	if err != nil {
-		return 0, 0, 0, 0, err
+		return nil, 0, 0, 0, err
 	}
 	UgHeaders(req, a)
 	data, err := c.doJSON(req, a)
 	if err != nil {
-		return 0, 0, 0, 0, err
+		return nil, 0, 0, 0, err
 	}
 	var resp struct {
 		UserEntitlementPackList []struct {
+			DisplayDesc string `json:"display_desc"`
+			GroupName   string `json:"group_name"`
+			ExpireTime  int64  `json:"expire_time"`
+			Status      int    `json:"status"`
 			EntitlementBaseInfo struct {
 				Quota struct {
 					CreditsLimit int64 `json:"credits_limit"`
@@ -503,7 +518,7 @@ func (c *Client) EntUsage(a *auth.Auth) (remain, limit, used int64, packs int, e
 		} `json:"user_entitlement_pack_list"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
-		return 0, 0, 0, 0, fmt.Errorf("ent usage parse: %w", err)
+		return nil, 0, 0, 0, fmt.Errorf("ent usage parse: %w", err)
 	}
 	for _, p := range resp.UserEntitlementPackList {
 		l := p.EntitlementBaseInfo.Quota.CreditsLimit
@@ -514,9 +529,18 @@ func (c *Client) EntUsage(a *auth.Auth) (remain, limit, used int64, packs int, e
 		limit += l
 		used += u
 		remain += l - u
-		packs++
+		packs = append(packs, EntPack{
+			Name: p.DisplayDesc, Group: p.GroupName,
+			Limit: l, Used: u, ExpireAt: p.ExpireTime, Status: p.Status,
+		})
 	}
-	return remain, limit, used, packs, nil
+	return packs, remain, limit, used, nil
+}
+
+// EntUsage 查询账号额度明细（积分总量/已用/剩余/权益包数）。
+func (c *Client) EntUsage(a *auth.Auth) (remain, limit, used int64, packs int, err error) {
+	ps, remain, limit, used, err := c.EntUsageDetail(a)
+	return remain, limit, used, len(ps), err
 }
 
 // GetUserInfo 查询账号信息（登录用）。

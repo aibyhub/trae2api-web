@@ -305,17 +305,23 @@ func sortInts(a []int) {
 // Stream 流式转换：SOLO SSE → OpenAI SSE chunk，每 chunk flush，保证至少一个 [DONE]。
 // 调用方必须先设置过 status 200；本函数自设 SSE headers。
 func Stream(w http.ResponseWriter, r io.Reader) error {
-	return streamOpts(w, r, nil)
+	return streamOpts(w, r, nil, nil)
 }
 
 // StreamWithError 同 Stream，额外在遇到上游 event:error 时回调 onErr（非 nil），
 // 供调用方冷却账号/记录日志；错误信息同时注入 SSE 事件流。
 func StreamWithError(w http.ResponseWriter, r io.Reader, onErr func(*SOLOStreamError)) error {
-	return streamOpts(w, r, onErr)
+	return streamOpts(w, r, onErr, nil)
+}
+
+// StreamWithErrorUsage 同 StreamWithError，额外在收到 token_usage 事件时回调
+// onUsage（非 nil），供使用日志记录 tokens。
+func StreamWithErrorUsage(w http.ResponseWriter, r io.Reader, onErr func(*SOLOStreamError), onUsage func(map[string]any)) error {
+	return streamOpts(w, r, onErr, onUsage)
 }
 
 // streamOpts Stream 的可选参数版本。
-func streamOpts(w http.ResponseWriter, r io.Reader, onErr func(*SOLOStreamError)) error {
+func streamOpts(w http.ResponseWriter, r io.Reader, onErr func(*SOLOStreamError), onUsage func(map[string]any)) error {
 	h := w.Header()
 	h.Set("Content-Type", "text/event-stream")
 	h.Set("Cache-Control", "no-cache")
@@ -408,6 +414,9 @@ func streamOpts(w http.ResponseWriter, r io.Reader, onErr func(*SOLOStreamError)
 				}
 			case "token_usage":
 				pendingUsage = ev.Usage
+				if onUsage != nil {
+					onUsage(ev.Usage)
+				}
 			case "done":
 				if err := writeChunk(map[string]any{}, ev.FinishReason); err != nil {
 					return err

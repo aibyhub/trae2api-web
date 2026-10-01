@@ -5,93 +5,132 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>trae2api-web 控制台</title>
 <style>
-  :root { --bg:#0f1115; --card:#171a21; --card2:#1d212b; --fg:#e6e9ef; --dim:#8a93a6;
-          --ok:#3fb96b; --warn:#e0a33e; --bad:#e05d5d; --accent:#4d9fff; }
+  :root { --bg:#0d1017; --card:#151923; --card2:#1c212e; --line:#242b3b; --fg:#e7eaf1; --dim:#8b95a9;
+          --ok:#41c46f; --warn:#e5a83e; --bad:#ef6461; --accent:#5aa2ff; --accent2:#8b7bff; }
   * { margin:0; padding:0; box-sizing:border-box; }
-  body { background:var(--bg); color:var(--fg); font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif; min-height:100vh; }
-  .wrap { max-width:1100px; margin:0 auto; padding:28px 20px 60px; }
-  header { display:flex; align-items:baseline; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-bottom:18px; }
-  h1 { font-size:22px; font-weight:600; letter-spacing:.3px; }
-  h1 small { color:var(--dim); font-weight:400; font-size:13px; margin-left:8px; }
+  body { background:radial-gradient(1200px 500px at 80% -10%, #16203a55, transparent), var(--bg);
+         color:var(--fg); font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif; min-height:100vh; }
+  .wrap { max-width:1200px; margin:0 auto; padding:26px 20px 70px; }
+  header { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-bottom:20px; }
+  .brand { display:flex; align-items:center; gap:12px; }
+  .logo { width:38px; height:38px; border-radius:10px; flex:none;
+          background:linear-gradient(135deg,#2a5cff66,#8b7bff44); border:1px solid #3a4468;
+          display:flex; align-items:center; justify-content:center;
+          font-weight:700; color:var(--accent); font-size:15px; }
+  h1 { font-size:20px; font-weight:600; letter-spacing:.3px; }
+  h1 small { color:var(--dim); font-weight:400; font-size:12px; margin-left:8px; }
   .toolbar { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
-  .btn { background:var(--card2); color:var(--fg); border:1px solid #2a2f3a; border-radius:8px;
+  .btn { background:var(--card2); color:var(--fg); border:1px solid var(--line); border-radius:8px;
          padding:8px 16px; font-size:13px; cursor:pointer; transition:.15s; }
   .btn:hover { border-color:var(--accent); color:var(--accent); }
-  .btn.primary { background:#1c3a5a; border-color:var(--accent); color:var(--accent); }
+  .btn:disabled { opacity:.5; cursor:not-allowed; }
+  .btn.primary { background:#173254; border-color:#2d5f9e; color:#9ecbff; }
+  .btn.primary:hover { border-color:var(--accent); color:#fff; }
   .btn.danger { border-color:#5a2a2a; }
   .btn.danger:hover { color:var(--bad); border-color:var(--bad); }
   .btn.sm { padding:4px 10px; font-size:12px; }
   #ts { color:var(--dim); font-size:12px; }
-  /* tabs */
-  .tabs { display:flex; gap:6px; margin-bottom:18px; border-bottom:1px solid #232836; }
-  .tab { padding:8px 16px; font-size:13px; cursor:pointer; color:var(--dim); border-bottom:2px solid transparent; }
-  .tab.active { color:var(--fg); border-bottom-color:var(--accent); }
+  .keybar { display:flex; gap:8px; align-items:center; margin-bottom:16px; font-size:12px; color:var(--dim);
+            flex-wrap:wrap; background:var(--card); border:1px solid var(--line); border-radius:10px; padding:10px 14px; }
+  .keybar input { background:var(--bg); border:1px solid var(--line); border-radius:6px; color:var(--fg);
+                  padding:5px 10px; font-size:12px; width:220px; font-family:Consolas,monospace; }
+  .keybar input:focus { outline:none; border-color:var(--accent); }
+  .keybar .saved { color:var(--ok); font-size:11px; }
+  .tabs { display:flex; gap:4px; margin-bottom:20px; background:var(--card); border:1px solid var(--line);
+          border-radius:10px; padding:4px; width:max-content; max-width:100%; overflow-x:auto; }
+  .tab { padding:8px 18px; font-size:13px; cursor:pointer; color:var(--dim); border-radius:7px; white-space:nowrap; transition:.15s; }
+  .tab:hover { color:var(--fg); }
+  .tab.active { color:#fff; background:#25304a; }
   .pane { display:none; }
   .pane.active { display:block; }
-  /* key bar */
-  .keybar { display:flex; gap:8px; align-items:center; margin-bottom:14px; font-size:12px; color:var(--dim); flex-wrap:wrap; }
-  .keybar input { background:var(--card); border:1px solid #2a2f3a; border-radius:6px; color:var(--fg);
-                  padding:5px 10px; font-size:12px; width:200px; font-family:Consolas,monospace; }
-  .keybar .saved { color:var(--ok); font-size:11px; }
-  /* credits grid */
-  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(300px,1fr)); gap:14px; }
-  .card { background:var(--card); border:1px solid #232836; border-radius:12px; padding:18px 18px 14px; }
-  .card.err { border-color:var(--bad); }
+  /* cards & grid */
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(330px,1fr)); gap:14px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px 18px 14px;
+          transition:border-color .15s; }
+  .card:hover { border-color:#313c55; }
+  .card.err { border-color:#5a2a2a; }
   .card-top { display:flex; justify-content:space-between; align-items:flex-start; gap:8px; }
   .nick { font-size:15px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .uid { color:var(--dim); font-size:11px; margin-top:2px; font-family:Consolas,monospace; }
   .badges { display:flex; gap:6px; flex-wrap:wrap; justify-content:flex-end; }
   .badge { font-size:11px; padding:3px 9px; border-radius:99px; white-space:nowrap; }
-  .b-ok   { background:#173a26; color:var(--ok); }
-  .b-warn { background:#3a2d13; color:var(--warn); }
-  .b-bad  { background:#3a1717; color:var(--bad); }
-  .b-dim  { background:#22262f; color:var(--dim); }
-  .credits { margin:16px 0 14px; display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }
+  .b-ok   { background:#143526; color:var(--ok); }
+  .b-warn { background:#392d13; color:var(--warn); }
+  .b-bad  { background:#391717; color:var(--bad); }
+  .b-dim  { background:#1e2431; color:var(--dim); }
+  .b-acc  { background:#16283f; color:var(--accent); }
+  .credits { margin:16px 0 12px; display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }
   .remain { font-size:34px; font-weight:700; font-variant-numeric:tabular-nums; }
-  .remain span { font-size:14px; color:var(--dim); font-weight:400; margin-left:4px; }
+  .remain span { font-size:13px; color:var(--dim); font-weight:400; margin-left:4px; }
   .meta { color:var(--dim); font-size:12px; display:flex; gap:14px; flex-wrap:wrap; }
   .meta b { color:var(--fg); font-weight:600; }
   .errline { margin-top:10px; color:var(--bad); font-size:12px; word-break:break-all; }
-  /* accounts table */
+  .card-foot { display:flex; justify-content:space-between; align-items:center; margin-top:12px;
+               border-top:1px dashed var(--line); padding-top:10px; }
+  .foot-note { color:var(--dim); font-size:11px; }
+  /* tables */
+  .tblwrap { background:var(--card); border:1px solid var(--line); border-radius:12px; overflow:auto; }
   table.accts { width:100%; border-collapse:collapse; font-size:13px; }
-  table.accts th, table.accts td { text-align:left; padding:10px 12px; border-bottom:1px solid #232836; }
-  table.accts th { color:var(--dim); font-weight:500; font-size:12px; }
-  table.accts tr:hover td { background:var(--card2); }
-  table.accts .mono { font-family:Consolas,monospace; font-size:11px; color:var(--dim); }
+  table.accts th, table.accts td { text-align:left; padding:10px 12px; border-bottom:1px solid var(--line); }
+  table.accts th { color:var(--dim); font-weight:500; font-size:12px; position:sticky; top:0; background:var(--card); z-index:1; }
+  table.accts tr:last-child td { border-bottom:none; }
+  table.accts tbody tr:hover td { background:var(--card2); }
+  table.accts .mono { font-family:Consolas,monospace; font-size:11.5px; color:var(--dim); }
+  .num { font-variant-numeric:tabular-nums; text-align:right !important; }
   .row-actions { display:flex; gap:6px; flex-wrap:wrap; justify-content:flex-end; }
   .toggle { position:relative; display:inline-block; width:38px; height:20px; }
   .toggle input { opacity:0; width:0; height:0; }
-  .toggle .slider { position:absolute; cursor:pointer; inset:0; background:#2a2f3a; border-radius:99px; transition:.15s; }
+  .toggle .slider { position:absolute; cursor:pointer; inset:0; background:#2a3040; border-radius:99px; transition:.15s; }
   .toggle .slider:before { content:""; position:absolute; height:14px; width:14px; left:3px; top:3px; background:var(--dim); border-radius:50%; transition:.15s; }
   .toggle input:checked + .slider { background:#1c3a5a; }
   .toggle input:checked + .slider:before { transform:translateX(18px); background:var(--accent); }
+  /* stat cards */
+  .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin-bottom:16px; }
+  .stat { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px; }
+  .stat .v { font-size:22px; font-weight:700; font-variant-numeric:tabular-nums; }
+  .stat .k { color:var(--dim); font-size:12px; margin-top:2px; }
   /* login + import */
-  .login-bar { background:var(--card); border:1px solid #232836; border-radius:12px; padding:16px 18px; margin-bottom:18px; }
-  .login-bar h2 { font-size:14px; font-weight:600; margin-bottom:10px; }
-  .login-status { font-size:12px; color:var(--dim); margin-top:8px; word-break:break-all; }
-  .login-status.err { color:var(--bad); }
-  .login-status.ok { color:var(--ok); }
-  textarea.imp { width:100%; min-height:90px; background:var(--card); border:1px solid #2a2f3a;
+  .panel { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px 18px; margin-bottom:16px; }
+  .panel h2 { font-size:14px; font-weight:600; margin-bottom:10px; }
+  .status-line { font-size:12px; color:var(--dim); margin-top:8px; word-break:break-all; }
+  .status-line.err { color:var(--bad); }
+  .status-line.ok { color:var(--ok); }
+  textarea.imp { width:100%; min-height:90px; background:var(--bg); border:1px solid var(--line);
                  border-radius:8px; color:var(--fg); padding:10px 12px; font-size:12px;
                  font-family:Consolas,monospace; resize:vertical; }
   .imp-row { display:flex; gap:10px; align-items:flex-start; margin-top:8px; flex-wrap:wrap; }
+  /* rates */
+  .rate-row { display:grid; grid-template-columns:1fr 130px auto; gap:10px; align-items:center;
+              padding:9px 14px; border-bottom:1px solid var(--line); font-size:13px; }
+  .rate-row:last-child { border-bottom:none; }
+  .rate-row:hover { background:var(--card2); }
+  .rate-row input { background:var(--bg); border:1px solid var(--line); border-radius:6px; color:var(--fg);
+                    padding:6px 10px; font-size:13px; width:100%; font-variant-numeric:tabular-nums; }
+  .rate-row input:focus { outline:none; border-color:var(--accent); }
   /* modal */
-  .modal-bg { position:fixed; inset:0; background:rgba(0,0,0,.6); display:none; align-items:center; justify-content:center; z-index:100; }
+  .modal-bg { position:fixed; inset:0; background:rgba(0,0,0,.65); display:none; align-items:center; justify-content:center; z-index:100; }
   .modal-bg.show { display:flex; }
-  .modal { background:var(--card); border:1px solid #2a2f3a; border-radius:12px; padding:20px; max-width:560px; width:92%; max-height:80vh; overflow:auto; }
+  .modal { background:var(--card); border:1px solid #2c3550; border-radius:14px; padding:20px; max-width:720px;
+           width:94%; max-height:82vh; overflow:auto; box-shadow:0 18px 60px #0009; }
   .modal h3 { font-size:15px; margin-bottom:12px; }
-  .modal pre { background:var(--bg); border:1px solid #232836; border-radius:8px; padding:12px; font-size:12px;
+  .modal pre { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:12px; font-size:12px;
               font-family:Consolas,monospace; overflow:auto; white-space:pre-wrap; word-break:break-all; color:var(--fg); }
   .modal .close { margin-top:14px; }
   .spin { display:inline-block; width:12px; height:12px; border:2px solid var(--card2); border-top-color:var(--accent);
           border-radius:50%; animation:sp .8s linear infinite; vertical-align:-2px; }
   @keyframes sp { to { transform:rotate(360deg); } }
+  .muted { color:var(--dim); font-size:12px; }
+  .log-ok { color:var(--ok); } .log-err { color:var(--bad); }
+  @media (max-width:640px){ .remain{font-size:28px} .wrap{padding:18px 12px 60px} }
 </style>
 </head>
 <body>
 <div class="wrap">
   <header>
-    <h1>trae2api-web 控制台<small>凭证管理 · 额度监控</small></h1>
+    <div class="brand">
+      <div class="logo">T2</div>
+      <h1>trae2api-web 控制台<small>账号 · 额度 · 用量 · 倍率</small></h1>
+    </div>
     <div class="toolbar">
       <span id="ts"></span>
       <button class="btn" onclick="refreshActive()">刷新</button>
@@ -100,57 +139,86 @@
 
   <div class="keybar">
     <span>API Key（写操作需）：</span>
-    <input id="apikey" type="password" placeholder="TW2A_API_KEY（写操作必填，点「记忆」保存）" oninput="onKeyChange()">
-    <button class="btn sm" onclick="saveKey()">保存</button>
+    <input id="apikey" type="password" placeholder="TW2A_API_KEY（写操作必填）" oninput="onKeyChange()">
+    <button class="btn sm" onclick="saveKey()">记忆</button>
     <span id="keystatus" class="saved" style="display:none">已记忆</span>
-    <span style="margin-left:auto;font-size:11px">列表/额度为只读；导入/删除/开关/登录/签到/刷新需 Key</span>
+    <span style="margin-left:auto;font-size:11px">列表/额度/日志/倍率只读；导入/删除/开关/登录/签到/刷新/保存倍率需 Key</span>
   </div>
 
   <div class="tabs">
     <div class="tab active" onclick="switchTab('accounts',this)">账号管理</div>
     <div class="tab" onclick="switchTab('credits',this)">额度监控</div>
+    <div class="tab" onclick="switchTab('usage',this)">使用日志</div>
+    <div class="tab" onclick="switchTab('rates',this)">模型倍率</div>
   </div>
 
   <!-- 账号管理 -->
   <div id="pane-accounts" class="pane active">
-    <div class="login-bar">
+    <div class="panel">
       <h2>添加账号（TRAE 登录）</h2>
       <button class="btn primary" id="loginBtn" onclick="startLogin()">添加账号（TRAE 登录）</button>
-      <div id="loginStatus" class="login-status" style="display:none"></div>
+      <div id="loginStatus" class="status-line" style="display:none"></div>
     </div>
 
-    <div class="login-bar">
+    <div class="panel">
       <h2>导入凭证（粘贴回调链接或 JSON）</h2>
       <textarea class="imp" id="impInput" placeholder="粘贴 http://127.0.0.1:18080/authorize?refreshToken=... 回调链接，或 {&quot;account&quot;:...,&quot;auth&quot;:...} / {&quot;accessToken&quot;:...,&quot;uid&quot;:...} JSON"></textarea>
       <div class="imp-row">
         <button class="btn" onclick="importCred()">导入</button>
-        <span id="impStatus" class="login-status" style="display:none"></span>
+        <span id="impStatus" class="status-line" style="display:none"></span>
       </div>
     </div>
 
-    <div class="login-bar">
-      <h2>定时任务操作<small style="color:var(--dim);font-weight:400;margin-left:8px">每日自动：签到 9:00 · token 刷新 3:00（时区 Asia/Shanghai）</small></h2>
+    <div class="panel">
+      <h2>定时任务<small style="color:var(--dim);font-weight:400;margin-left:8px">每日自动：签到 9:00 · token 刷新 3:00（Asia/Shanghai）</small></h2>
       <div class="imp-row">
         <button class="btn primary" id="checkinAllBtn" onclick="checkinAll()">立即签到（全部账号）</button>
         <button class="btn" id="refreshAllBtn" onclick="refreshAllTokens()">立即刷新凭证</button>
-        <span id="opsStatus" class="login-status" style="display:none"></span>
+        <span id="opsStatus" class="status-line" style="display:none"></span>
       </div>
     </div>
 
-    <div id="acctTable"><div style="color:var(--dim)"><span class="spin"></span> 加载中...</div></div>
+    <div id="acctTable"><div class="muted"><span class="spin"></span> 加载中...</div></div>
   </div>
 
   <!-- 额度监控 -->
   <div id="pane-credits" class="pane">
-    <div class="grid" id="grid"><div style="color:var(--dim)"><span class="spin"></span> 切换到「账号管理」tab 查看详情，或点刷新</div></div>
+    <div class="grid" id="grid"><div class="muted"><span class="spin"></span> 加载中...</div></div>
+  </div>
+
+  <!-- 使用日志 -->
+  <div id="pane-usage" class="pane">
+    <div class="stats" id="usageStats"></div>
+    <div class="imp-row" style="margin-bottom:12px">
+      <select id="usageLimit" class="btn" onchange="loadUsage()" style="padding:6px 10px">
+        <option value="50">最近 50 条</option>
+        <option value="100" selected>最近 100 条</option>
+        <option value="300">最近 300 条</option>
+      </select>
+      <label class="muted" style="display:flex;align-items:center;gap:6px">
+        <input type="checkbox" id="usageAuto" onchange="toggleUsageAuto()"> 每 10 秒自动刷新
+      </label>
+      <span class="muted">消耗 = total_tokens × 倍率（相对估算，非上游真实计费）</span>
+    </div>
+    <div id="usageTable" class="tblwrap"><div class="muted" style="padding:14px"><span class="spin"></span> 加载中...</div></div>
+  </div>
+
+  <!-- 模型倍率 -->
+  <div id="pane-rates" class="pane">
+    <div class="panel" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <span class="muted">倍率用于使用日志的消耗估算（默认 1）。改完记得保存。</span>
+      <button class="btn primary" id="saveRatesBtn" onclick="saveRates()" style="margin-left:auto">保存倍率</button>
+      <span id="ratesStatus" class="status-line" style="display:none;margin:0"></span>
+    </div>
+    <div id="ratesTable" class="tblwrap"><div class="muted" style="padding:14px"><span class="spin"></span> 加载中...</div></div>
   </div>
 </div>
 
-<!-- JSON 预览 modal -->
+<!-- modal -->
 <div class="modal-bg" id="modalBg" onclick="if(event.target===this)closeModal()">
   <div class="modal">
-    <h3 id="modalTitle">凭证预览（脱敏）</h3>
-    <pre id="modalBody"></pre>
+    <h3 id="modalTitle">详情</h3>
+    <div id="modalBody"></div>
     <button class="btn sm close" onclick="closeModal()">关闭</button>
   </div>
 </div>
@@ -158,10 +226,12 @@
 <script>
 let activeTab = 'accounts';
 let loginPollTimer = null;
+let usageAutoTimer = null;
 
 function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function badge(text, cls){ return '<span class="badge '+cls+'">'+esc(text)+'</span>'; }
-function fmt(n){ return (n==null?'-':Number(n).toLocaleString()); }
+function fmt(n){ return (n==null||isNaN(n)?'-':Number(n).toLocaleString()); }
+function fmt2(n){ return (n==null||isNaN(n)?'-':Number(n).toFixed(2)); }
 function authHeader(){
   const k = getKey();
   return k ? { 'Authorization': 'Bearer ' + k } : {};
@@ -190,9 +260,20 @@ function switchTab(name, el){
   el.classList.add('active');
   document.querySelectorAll('.pane').forEach(p=>p.classList.remove('active'));
   document.getElementById('pane-'+name).classList.add('active');
+  toggleUsageAuto();
   refreshActive();
 }
-function refreshActive(){ if(activeTab==='accounts') loadAccounts(); else loadCredits(); }
+function refreshActive(){
+  if(activeTab==='accounts') loadAccounts();
+  else if(activeTab==='credits') loadCredits();
+  else if(activeTab==='usage') loadUsage();
+  else if(activeTab==='rates') loadRates();
+}
+function toggleUsageAuto(){
+  const on = activeTab==='usage' && document.getElementById('usageAuto').checked;
+  if(on && !usageAutoTimer){ usageAutoTimer = setInterval(loadUsage, 10000); }
+  if(!on && usageAutoTimer){ clearInterval(usageAutoTimer); usageAutoTimer = null; }
+}
 
 /* ─── 账号管理 ─── */
 async function loadAccounts(){
@@ -202,13 +283,13 @@ async function loadAccounts(){
     renderAccounts(d.accounts||[]);
     document.getElementById('ts').textContent = '更新于 ' + new Date().toLocaleTimeString();
   }catch(e){
-    document.getElementById('acctTable').innerHTML = '<div style="color:var(--bad)">加载失败：'+esc(e.message)+'（服务是否在运行？）</div>';
+    document.getElementById('acctTable').innerHTML = '<div style="color:var(--bad);padding:14px">加载失败：'+esc(e.message)+'（服务是否在运行？）</div>';
   }
 }
 function renderAccounts(accts){
   const el = document.getElementById('acctTable');
   if(!accts.length){
-    el.innerHTML = '<div style="color:var(--dim);padding:14px">暂无账号，点上方「添加账号」登录，或粘贴回调链接导入。</div>';
+    el.innerHTML = '<div class="muted" style="padding:14px">暂无账号，点上方「添加账号」登录，或粘贴回调链接导入。</div>';
     return;
   }
   let rows = accts.map(a=>{
@@ -225,7 +306,7 @@ function renderAccounts(accts){
       + '<td><div class="nick">'+esc(a.nickname||'(未命名)')+'</div>'
       + '<div class="uid mono">'+esc(a.uid)+'</div></td>'
       + '<td>'+badges+(a.reason?'<div class="mono" style="margin-top:4px">'+esc(a.reason)+'</div>':'')+'</td>'
-      + '<td class="mono">'+fmt(a.credits)+'</td>'
+      + '<td class="mono num">'+fmt(a.credits)+'</td>'
       + '<td class="mono">'+esc(exp)+'</td>'
       + '<td class="mono">'+esc(a.machine_id||'-')+' / '+esc(a.device_id||'-')+'</td>'
       + '<td><div class="row-actions">'
@@ -237,9 +318,9 @@ function renderAccounts(accts){
       + '</div></td>'
       + '</tr>';
   }).join('');
-  el.innerHTML = '<table class="accts"><thead><tr>'
-    + '<th>账号</th><th>状态</th><th>积分</th><th>Token 有效期</th><th>机器/设备(前8)</th><th style="text-align:right">操作</th>'
-    + '</tr></thead><tbody>'+rows+'</tbody></table>';
+  el.innerHTML = '<div class="tblwrap"><table class="accts"><thead><tr>'
+    + '<th>账号</th><th>状态</th><th style="text-align:right">积分</th><th>Token 有效期</th><th>机器/设备(前8)</th><th style="text-align:right">操作</th>'
+    + '</tr></thead><tbody>'+rows+'</tbody></table></div>';
 }
 async function toggleAcct(uid, enabled){
   const r = await fetch('/admin/api/accounts/'+encodeURIComponent(uid), {
@@ -267,8 +348,11 @@ async function deleteAcct(uid){
 async function showJSON(uid){
   const r = await fetch('/admin/api/accounts/'+encodeURIComponent(uid)+'/json', {cache:'no-store'});
   const d = await r.json();
-  document.getElementById('modalTitle').textContent = '凭证预览（脱敏）— '+(d.nickname||d.uid);
-  document.getElementById('modalBody').textContent = JSON.stringify(d, null, 2);
+  showModal('凭证预览（脱敏）— '+(d.nickname||d.uid), '<pre>'+esc(JSON.stringify(d, null, 2))+'</pre>');
+}
+function showModal(title, html){
+  document.getElementById('modalTitle').textContent = title;
+  document.getElementById('modalBody').innerHTML = html;
   document.getElementById('modalBg').classList.add('show');
 }
 function closeModal(){ document.getElementById('modalBg').classList.remove('show'); }
@@ -276,7 +360,7 @@ function closeModal(){ document.getElementById('modalBg').classList.remove('show
 /* ─── 定时任务手动触发 ─── */
 function opsStatusShow(cls, text){
   const st = document.getElementById('opsStatus');
-  st.style.display=''; st.className='login-status'+(cls?' '+cls:''); st.textContent=text;
+  st.style.display=''; st.className='status-line'+(cls?' '+cls:''); st.textContent=text;
 }
 function opText(res){
   const map = {claimed:'领取成功', already:'今日已签', checkin_off:'签到未开启', refreshed:'已刷新', skipped:'跳过', error:'失败'};
@@ -329,39 +413,34 @@ async function importCred(){
   const v = document.getElementById('impInput').value.trim();
   if(!v){ return; }
   const st = document.getElementById('impStatus');
-  st.style.display=''; st.className='login-status'; st.textContent='导入中...';
-  let body, contentType;
-  if(v.startsWith('{')){
-    body = JSON.stringify({json: v}); contentType='application/json';
-  } else {
-    body = JSON.stringify({callback_url: v}); contentType='application/json';
-  }
+  st.style.display=''; st.className='status-line'; st.textContent='导入中...';
+  const body = v.startsWith('{') ? JSON.stringify({json: v}) : JSON.stringify({callback_url: v});
   try{
     const r = await fetch('/admin/api/accounts/import', {
-      method:'POST', headers:{'Content-Type':contentType, ...authHeader()}, body
+      method:'POST', headers:{'Content-Type':'application/json', ...authHeader()}, body
     });
     const d = await r.json();
-    if(!r.ok){ st.className='login-status err'; st.textContent='导入失败：'+apiErr(d); return; }
-    st.className='login-status ok';
+    if(!r.ok){ st.className='status-line err'; st.textContent='导入失败：'+apiErr(d); return; }
+    st.className='status-line ok';
     st.textContent='导入成功：'+(d.uid||'?')+'（'+(d.action||'')+'）';
     document.getElementById('impInput').value='';
     loadAccounts();
-  }catch(e){ st.className='login-status err'; st.textContent='导入失败：'+e.message; }
+  }catch(e){ st.className='status-line err'; st.textContent='导入失败：'+e.message; }
 }
 
 /* ─── Web 登录闭环 ─── */
 async function startLogin(){
   const st = document.getElementById('loginStatus');
-  st.style.display=''; st.className='login-status'; st.textContent='生成登录链接...';
+  st.style.display=''; st.className='status-line'; st.textContent='生成登录链接...';
   const btn = document.getElementById('loginBtn'); btn.disabled = true;
   try{
     const r = await fetch('/admin/api/login', {method:'POST', headers:{'Content-Type':'application/json', ...authHeader()}, body:'{}'});
     const d = await r.json();
-    if(!r.ok){ st.className='login-status err'; st.textContent='生成失败：'+apiErr(d); btn.disabled=false; return; }
+    if(!r.ok){ st.className='status-line err'; st.textContent='生成失败：'+apiErr(d); btn.disabled=false; return; }
     st.textContent = '已打开登录窗口，请在浏览器完成手机号登录。完成后此页自动刷新。';
     window.open(d.login_url, '_blank');
     pollLogin(d.pending_id);
-  }catch(e){ st.className='login-status err'; st.textContent='生成失败：'+e.message; btn.disabled=false; }
+  }catch(e){ st.className='status-line err'; st.textContent='生成失败：'+e.message; btn.disabled=false; }
 }
 function pollLogin(pid){
   if(loginPollTimer) clearInterval(loginPollTimer);
@@ -369,19 +448,19 @@ function pollLogin(pid){
   let waited = 0;
   loginPollTimer = setInterval(async ()=>{
     waited += 2;
-    if(waited > 180){ clearInterval(loginPollTimer); st.className='login-status err'; st.textContent='登录超时（3分钟），请重试'; document.getElementById('loginBtn').disabled=false; return; }
+    if(waited > 180){ clearInterval(loginPollTimer); st.className='status-line err'; st.textContent='登录超时（3分钟），请重试'; document.getElementById('loginBtn').disabled=false; return; }
     try{
       const r = await fetch('/admin/api/login/result?pending_id='+encodeURIComponent(pid), {cache:'no-store'});
       const d = await r.json();
       if(d.state==='success'){
         clearInterval(loginPollTimer);
-        st.className='login-status ok';
+        st.className='status-line ok';
         st.textContent='登录成功：'+(d.nickname||'')+'（'+(d.uid||'')+'）';
         document.getElementById('loginBtn').disabled=false;
         loadAccounts();
       } else if(d.state==='failed'){
         clearInterval(loginPollTimer);
-        st.className='login-status err';
+        st.className='status-line err';
         st.textContent='登录失败：'+(d.error||'未知');
         document.getElementById('loginBtn').disabled=false;
       } else {
@@ -391,14 +470,22 @@ function pollLogin(pid){
   }, 2000);
 }
 
-/* ─── 额度监控（原卡片视图，保留） ─── */
+/* ─── 额度监控（含权益包明细/过期时间） ─── */
+function fmtDate(sec){
+  if(!sec) return '-';
+  return new Date(sec*1000).toLocaleDateString();
+}
+function daysLeft(sec){
+  if(!sec) return Infinity;
+  return Math.ceil((sec*1000 - Date.now()) / 86400000);
+}
 function renderCredits(d){
   const grid = document.getElementById('grid');
   if(!d.accounts || d.accounts.length===0){
-    grid.innerHTML = '<div style="color:var(--dim)">暂无账号</div>';
+    grid.innerHTML = '<div class="muted">暂无账号</div>';
     return;
   }
-  grid.innerHTML = d.accounts.map(a=>{
+  grid.innerHTML = d.accounts.map((a,idx)=>{
     let badges = '';
     if(a.error) badges += badge('查询失败','b-bad');
     else {
@@ -406,10 +493,20 @@ function renderCredits(d){
       else badges += a.checkin_enable ? badge('未签到','b-warn') : badge('签到禁用','b-dim');
       if(a.cooling) badges += badge('冷却中','b-warn');
       if(a.disabled) badges += badge('已禁用','b-bad');
-      if(a.packs>0) badges += badge(a.packs+' 权益包','b-dim');
+      if(a.packs>0) badges += badge(a.packs+' 权益包','b-acc');
     }
+    // 最近一个未过期包的过期时间
+    let soonest = 0;
+    (a.packs_detail||[]).forEach(p=>{
+      if(p.limit>0 && p.expire_at && (!soonest || p.expire_at<soonest)) soonest = p.expire_at;
+    });
+    const expNote = soonest
+      ? (()=>{ const dl = daysLeft(soonest);
+          const cls = dl<=7?'b-bad':(dl<=30?'b-warn':'b-dim');
+          return '<span style="margin-left:auto">'+badge('最近过期 '+fmtDate(soonest)+(dl<=3650?'（剩 '+dl+' 天）':''), cls)+'</span>'; })()
+      : '';
     const remainLine = a.error ? '<div style="color:var(--bad);font-size:14px">额度查询失败</div>'
-      : '<div class="remain">'+fmt(a.remain)+'<span>积分剩余</span></div>';
+      : '<div class="credits"><div class="remain">'+fmt(a.remain)+'<span>积分剩余</span></div></div>';
     const meta = a.error ? '' :
       '<div class="meta"><span>总量 <b>'+fmt(a.limit)+'</b></span><span>已用 <b>'+fmt(a.used)+'</b></span>'+
       (a.checkin_enable ? '<span>今日可领 <b>'+fmt(a.checkin_credits)+'</b></span>' : '')+'</div>';
@@ -418,16 +515,144 @@ function renderCredits(d){
       + '<div class="uid">'+esc(a.uid)+'</div></div><div class="badges">'+badges+'</div></div>'
       + remainLine + meta
       + (a.error ? '<div class="errline">'+esc(a.error)+'</div>' : '')
+      + '<div class="card-foot"><span class="foot-note">积分有效期随权益包，详见明细</span>'
+      +   '<div>'+(a.packs_detail&&a.packs_detail.length
+      +     ? '<button class="btn sm" onclick="showPacks('+idx+')">积分明细 / 过期时间</button>' : '')
+      +   '</div></div>'
       + '</div>';
   }).join('');
+  window._lastCredits = d.accounts;
+}
+function showPacks(idx){
+  const a = (window._lastCredits||[])[idx];
+  if(!a || !a.packs_detail) return;
+  const packs = [...a.packs_detail].sort((x,y)=>(x.expire_at||9e15)-(y.expire_at||9e15));
+  const rows = packs.map(p=>{
+    const dl = daysLeft(p.expire_at);
+    let expBadge = badge(fmtDate(p.expire_at)+(dl<=3650?'（剩 '+dl+' 天）':''), dl<=7?'b-bad':(dl<=30?'b-warn':'b-dim'));
+    return '<tr>'
+      + '<td>'+esc(p.name||'(未命名)')+'</td>'
+      + '<td class="mono">'+esc(p.group||'-')+'</td>'
+      + '<td class="mono num">'+fmt(p.limit)+'</td>'
+      + '<td class="mono num">'+fmt(p.used)+'</td>'
+      + '<td>'+expBadge+'</td>'
+      + '</tr>';
+  }).join('');
+  showModal('积分明细 — '+(a.nickname||a.uid),
+    '<div class="tblwrap" style="border-radius:8px"><table class="accts"><thead><tr>'
+    + '<th>权益包</th><th>分组</th><th style="text-align:right">额度</th><th style="text-align:right">已用</th><th>过期时间</th>'
+    + '</tr></thead><tbody>'+rows+'</tbody></table></div>'
+    + '<div class="muted" style="margin-top:10px">剩余 = Σ(额度 − 已用)；过期时间来自上游权益包（expire_time），与 TRAE 客户端一致。</div>');
 }
 async function loadCredits(){
   try{
     const r = await fetch('/admin/api/credits', {cache:'no-store'});
     renderCredits(await r.json());
+    document.getElementById('ts').textContent = '更新于 ' + new Date().toLocaleTimeString();
   }catch(e){
     document.getElementById('grid').innerHTML = '<div style="color:var(--bad)">加载失败：'+esc(e.message)+'</div>';
   }
+}
+
+/* ─── 使用日志 ─── */
+async function loadUsage(){
+  try{
+    const limit = document.getElementById('usageLimit').value || 100;
+    const r = await fetch('/admin/api/usage?limit='+limit, {cache:'no-store'});
+    const d = await r.json();
+    renderUsage(d);
+    document.getElementById('ts').textContent = '更新于 ' + new Date().toLocaleTimeString();
+  }catch(e){
+    document.getElementById('usageTable').innerHTML = '<div style="color:var(--bad);padding:14px">加载失败：'+esc(e.message)+'</div>';
+  }
+}
+function renderUsage(d){
+  const t = d.today || {};
+  document.getElementById('usageStats').innerHTML =
+    '<div class="stat"><div class="v">'+fmt(t.requests)+'</div><div class="k">今日请求</div></div>'
+    + '<div class="stat"><div class="v">'+fmt(t.prompt_tokens)+'</div><div class="k">今日输入 tokens</div></div>'
+    + '<div class="stat"><div class="v">'+fmt(t.completion_tokens)+'</div><div class="k">今日输出 tokens</div></div>'
+    + '<div class="stat"><div class="v">'+fmt2(t.cost)+'</div><div class="k">今日估算消耗</div></div>';
+  const es = d.entries || [];
+  const el = document.getElementById('usageTable');
+  if(!es.length){
+    el.innerHTML = '<div class="muted" style="padding:14px">暂无请求记录 —— 发一次 /v1/chat/completions 后这里会出现日志。</div>';
+    return;
+  }
+  const rows = es.map(e=>{
+    const st = e.status==='ok' ? '<span class="log-ok">成功</span>' : '<span class="log-err" title="'+esc(e.error||'')+'">失败</span>';
+    const timeStr = new Date(e.ts).toLocaleString();
+    return '<tr>'
+      + '<td class="mono">'+esc(timeStr)+'</td>'
+      + '<td class="mono">'+esc(e.uid ? e.uid.slice(0,8) : '-')+'</td>'
+      + '<td class="mono">'+esc(e.model||'-')+(e.stream?' <span class="muted">流</span>':'')+'</td>'
+      + '<td class="mono num">'+fmt(e.prompt_tokens)+'</td>'
+      + '<td class="mono num">'+fmt(e.completion_tokens)+'</td>'
+      + '<td class="mono num">'+fmt(e.total_tokens)+'</td>'
+      + '<td class="mono num">'+fmt2(e.rate)+'</td>'
+      + '<td class="mono num">'+fmt2(e.cost)+'</td>'
+      + '<td class="mono num">'+fmt(e.duration_ms)+'ms</td>'
+      + '<td>'+st+(e.error?'<div class="mono" style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(e.error)+'">'+esc(e.error)+'</div>':'')+'</td>'
+      + '</tr>';
+  }).join('');
+  el.innerHTML = '<table class="accts"><thead><tr>'
+    + '<th>时间</th><th>账号</th><th>模型</th><th style="text-align:right">输入</th><th style="text-align:right">输出</th>'
+    + '<th style="text-align:right">合计</th><th style="text-align:right">倍率</th><th style="text-align:right">消耗</th>'
+    + '<th style="text-align:right">耗时</th><th>状态</th>'
+    + '</tr></thead><tbody>'+rows+'</tbody></table>';
+}
+
+/* ─── 模型倍率 ─── */
+let rateModels = [];
+async function loadRates(){
+  try{
+    const [mr, mm] = await Promise.all([
+      fetch('/admin/api/rates', {cache:'no-store'}).then(r=>r.json()),
+      fetch('/v1/models', {headers: authHeader(), cache:'no-store'}).then(r=>r.json()).catch(()=>({data:[]}))
+    ]);
+    const rates = mr.rates || {};
+    rateModels = (mm.data||[]).map(m=>m.id);
+    Object.keys(rates).forEach(k=>{ if(!rateModels.includes(k)) rateModels.push(k); });
+    rateModels.sort();
+    renderRates(rates);
+  }catch(e){
+    document.getElementById('ratesTable').innerHTML = '<div style="color:var(--bad);padding:14px">加载失败：'+esc(e.message)+'</div>';
+  }
+}
+function renderRates(rates){
+  const el = document.getElementById('ratesTable');
+  if(!rateModels.length){
+    el.innerHTML = '<div class="muted" style="padding:14px">暂无模型（等模型列表拉取后再来配置）。</div>';
+    return;
+  }
+  const rows = rateModels.map(m=>{
+    const v = rates[m] != null ? rates[m] : 1;
+    return '<div class="rate-row">'
+      + '<span class="mono">'+esc(m)+'</span>'
+      + '<input type="number" step="0.1" min="0" max="1000" value="'+esc(v)+'" data-model="'+esc(m)+'">'
+      + '<span class="muted">倍率</span>'
+      + '</div>';
+  }).join('');
+  el.innerHTML = rows;
+}
+async function saveRates(){
+  const inputs = document.querySelectorAll('#ratesTable input[data-model]');
+  const rates = {};
+  inputs.forEach(inp=>{
+    const v = parseFloat(inp.value);
+    if(!isNaN(v)) rates[inp.dataset.model] = v;
+  });
+  const btn = document.getElementById('saveRatesBtn'); btn.disabled = true;
+  const st = document.getElementById('ratesStatus');
+  st.style.display=''; st.className='status-line'; st.textContent='保存中...';
+  try{
+    const r = await fetch('/admin/api/rates', {method:'PUT', headers:{'Content-Type':'application/json', ...authHeader()}, body: JSON.stringify({rates})});
+    const d = await r.json();
+    if(!r.ok){ st.className='status-line err'; st.textContent='保存失败：'+apiErr(d); return; }
+    st.className='status-line ok'; st.textContent='已保存（倍率即日对新的请求生效）';
+    setTimeout(()=>{ st.style.display='none'; }, 2500);
+  }catch(e){ st.className='status-line err'; st.textContent='保存失败：'+e.message; }
+  finally{ btn.disabled = false; }
 }
 
 /* 初始 */

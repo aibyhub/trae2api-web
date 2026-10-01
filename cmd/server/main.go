@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -77,6 +78,7 @@ func main() {
 		Upstream:     up,
 		APIKey:       cfg.APIKey,
 		AuthDir:      cfg.AuthDir,
+		DataDir:      filepath.Dir(cfg.StateFile),
 		PlanCooldown: cfg.PlanCreditDur,
 		SoftCooldown: cfg.SoftRateDur,
 		ErrThreshold: cfg.Cooldown.ErrThresh,

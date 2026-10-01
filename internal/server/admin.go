@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"trae2api-web/internal/pool"
+	"trae2api-web/internal/upstream"
 )
 
 //go:embed admin.html
@@ -20,21 +21,22 @@ func (h *Handler) adminPage(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(adminPageHTML)
 }
 
-// adminCredits 查询全部账号的实时额度 + 签到状态（并发拉取上游）。
+// adminCredits 查询全部账号的实时额度 + 签到状态 + 权益包明细（并发拉取上游）。
 func (h *Handler) adminCredits(w http.ResponseWriter, r *http.Request) {
 	type acct struct {
-		UID            string `json:"uid"`
-		Nickname       string `json:"nickname"`
-		Remain         int64  `json:"remain"`
-		Limit          int64  `json:"limit"`
-		Used           int64  `json:"used"`
-		Packs          int    `json:"packs"`
-		CheckedIn      bool   `json:"checked_in"`
-		CheckinCredits int64  `json:"checkin_credits"`
-		CheckinEnable  bool   `json:"checkin_enable"`
-		Cooling        bool   `json:"cooling"`
-		Disabled       bool   `json:"disabled"`
-		Error          string `json:"error,omitempty"`
+		UID            string           `json:"uid"`
+		Nickname       string           `json:"nickname"`
+		Remain         int64            `json:"remain"`
+		Limit          int64            `json:"limit"`
+		Used           int64            `json:"used"`
+		Packs          int              `json:"packs"`
+		PacksDetail    []upstream.EntPack `json:"packs_detail,omitempty"`
+		CheckedIn      bool             `json:"checked_in"`
+		CheckinCredits int64            `json:"checkin_credits"`
+		CheckinEnable  bool             `json:"checkin_enable"`
+		Cooling        bool             `json:"cooling"`
+		Disabled       bool             `json:"disabled"`
+		Error          string           `json:"error,omitempty"`
 	}
 
 	st := h.cfg.Pool.List()
@@ -54,11 +56,13 @@ func (h *Handler) adminCredits(w http.ResponseWriter, r *http.Request) {
 			ac.Nickname = s.Nickname
 			ac.Cooling = s.Cooling
 			ac.Disabled = s.Disabled
-			remain, limit, used, packs, err := h.cfg.Upstream.EntUsage(a)
+			packsDetail, remain, limit, used, err := h.cfg.Upstream.EntUsageDetail(a)
 			if err != nil {
 				ac.Error = "ent_usage: " + err.Error()
 			} else {
-				ac.Remain, ac.Limit, ac.Used, ac.Packs = remain, limit, used, packs
+				ac.Remain, ac.Limit, ac.Used = remain, limit, used
+				ac.Packs = len(packsDetail)
+				ac.PacksDetail = packsDetail
 			}
 			checkedIn, credits, enable, cerr := h.cfg.Upstream.CheckinStatus(a)
 			if cerr != nil {
