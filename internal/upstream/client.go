@@ -1,9 +1,10 @@
-﻿// client.go SOLO 上游客户端：llm_utils_chat / get_detail_param / ExchangeToken /
+// client.go SOLO 上游客户端：llm_utils_chat / get_detail_param / ExchangeToken /
 // checkin_credits / ide_user_ent_usage + 错误分类。
 package upstream
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -186,6 +187,26 @@ func (c *Client) clientFor(a *auth.Auth) (std, stream *http.Client) {
 		tr = &http.Transport{}
 	}
 	tr.Proxy = http.ProxyURL(u)
+	// v1.2.8 修复：走代理的出口一律只谈 HTTP/1.1（关掉自动 HTTP/2 + 清掉 ALPN 里的 h2）。
+	//
+	// 起因：base.Clone() 会在原 transport 上先跑完 HTTP/2 自动配置，把带 "h2" 的
+	// TLSClientConfig（ALPN）复制给克隆体，却因 tlsNextProtoWasNil 不复制
+	// TLSNextProto；而克隆体的 onceSetNextProtoDefaults 见 TLSClientConfig 非空
+	// （ForceAttemptHTTP2=false）就提前 return —— 于是这个 transport「ALPN 宣告 h2、
+	// 却没有 h2 实现」，上游回的 HTTP/2 SETTINGS 帧被按 HTTP/1.1 解析：
+	//   net/http: HTTP/1.x transport connection broken: malformed HTTP response "\x00\x00\x12\x04..."
+	//
+	// 实测（2026-10-01 线上 SOCKS5 出口 10.0.0.1/2/3）：直连走 h2 正常，但经代理
+	// 协商 h2 的链路不稳定（curl 带 h2 ALPN 时握手直接被重置）；强制 HTTP/1.1 后
+	// 额度/签到接口立即恢复（约 1.2s 返回）。直连路径不受影响，仍用 h2。
+	// 注意：TLSNextProto 必须非 nil（Go 用它关闭自动 HTTP/2），且必须同时把 ALPN
+	// 里的 h2 去掉——否则服务器照样协商 h2，结果与旧 bug 相同。
+	tr.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
+	if tr.TLSClientConfig != nil {
+		tc := tr.TLSClientConfig.Clone()
+		tc.NextProtos = []string{"http/1.1"}
+		tr.TLSClientConfig = tc
+	}
 	p := &proxyPair{
 		std:    &http.Client{Timeout: c.HTTP.Timeout, Transport: tr},
 		stream: &http.Client{Transport: tr}, // 无总超时（SSE）

@@ -2,6 +2,7 @@
 package upstream
 
 import (
+	"net/http"
 	"testing"
 
 	"trae2api-web/internal/auth"
@@ -79,5 +80,29 @@ func TestClientForProxy(t *testing.T) {
 	badStd, _ := c.clientFor(a)
 	if badStd != c.HTTP {
 		t.Fatal("invalid proxy should fall back to default")
+	}
+}
+
+// TestProxyTransportPinsHTTP1 回归（v1.2.8）：走代理的 transport 必须只谈 HTTP/1.1。
+// 起因见 clientFor 注释：Clone() 会把带 "h2" 的 TLSClientConfig 复制过来却丢掉
+// TLSNextProto，导致「宣告 h2、没有 h2 实现」，上游 h2 帧被按 HTTP/1.1 解析
+// （malformed HTTP response "\x00\x00\x12\x04..."）——走代理的账号签到/额度全挂。
+func TestProxyTransportPinsHTTP1(t *testing.T) {
+	c := New()
+	a := &auth.Auth{AccessToken: "at", ProxyURL: "socks5://127.0.0.1:1080"}
+	std, _ := c.clientFor(a)
+	tr, ok := std.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("proxy client transport = %T, want *http.Transport", std.Transport)
+	}
+	if tr.TLSNextProto == nil {
+		t.Fatal("proxy transport must set a non-nil TLSNextProto to disable auto HTTP/2")
+	}
+	if tr.TLSClientConfig != nil {
+		for _, p := range tr.TLSClientConfig.NextProtos {
+			if p == "h2" {
+				t.Fatalf("proxy transport must not advertise h2 in ALPN, got %v", tr.TLSClientConfig.NextProtos)
+			}
+		}
 	}
 }
