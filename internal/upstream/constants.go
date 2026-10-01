@@ -12,6 +12,8 @@ const (
 	IdeVersionCode = "20260811"
 	DeviceBrand    = "83DG"
 	OSVersion      = "Windows 11 Pro"
+	DeviceOSName   = "windows" // commonParams.os_name（fb() → X-Device-Type）
+	AppVersion     = "0.1.64"  // 真机 aha manifest appVersion（UG 通道 X-App-Version / UG UA）
 	Function       = "solo_work_lite"
 
 	// 端点

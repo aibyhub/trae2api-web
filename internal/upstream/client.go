@@ -319,8 +319,11 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 	return out, nil
 }
 
-// ugCheckinBody status/claim 的请求体（实测与官方客户端一致：{"req_source":1}）。
-var ugCheckinBody = []byte(`{"req_source":1}`)
+// ugCheckinBody status/claim 的请求体。
+// req_source 逆向自客户端 main.js：`Pr(this.P)?2:1`，Pr=产品线判定
+// （Gje() 明示 trae_client: Lite↔req_source=2 / IDE↔1）。网关模拟 solo 产品线
+// （solo_work_lite），必须发 2；旧值 1 是 IDE 档，v1.1.3 及之前为臆测值。
+var ugCheckinBody = []byte(`{"req_source":2}`)
 
 // CheckinStatus 查询签到状态。
 // ug 通道业务码随 HTTP 200 返回，需同时解析 code 与字段（兼容 data 嵌套形态）。
@@ -363,8 +366,8 @@ func (c *Client) CheckinStatus(a *auth.Auth) (checkedIn bool, credits int64, ena
 // 两个实测坑（见 RESEARCH §3/§5 与公开复盘）：
 //   - 业务码随 HTTP 200 返回（如 9074），只看 HTTP 状态码会把失败当成功——必须解析 body 的 code
 //   - claim 必须带 X-Device-Id 头（缺失 → 9004「order parameters incorrect」；
-//     设备号未被账号注册 → 9074「人数太多」幌子文案）。设备对由登录流程生成并随 OAuth 注册，
-//     粘贴导入的账号需在导入时补生成（见 server.importFromCallback）。
+//     设备号未被账号注册 → 9074「当前参与用户太多」为通用反滥用文案，非真实容量信号，
+//     确定性拒绝，重试无意义——调用方不要对 9074 做重试）。
 func (c *Client) CheckinClaim(a *auth.Auth) error {
 	req, err := http.NewRequest(http.MethodPost, c.ugBase()+EpCheckinClaim, bytes.NewReader(ugCheckinBody))
 	if err != nil {
@@ -407,7 +410,9 @@ func (c *Client) UserEntUsage(a *auth.Auth) (remain int64, err error) {
 // EntUsage 查询账号额度明细（积分总量/已用/剩余/权益包数）。
 // remain = limit - used，usage.credits_amount 是已用积分（实测）。
 func (c *Client) EntUsage(a *auth.Auth) (remain, limit, used int64, packs int, err error) {
-	req, err := http.NewRequest(http.MethodPost, c.ugBase()+EpEntUsage, bytes.NewReader([]byte("{}")))
+	// 请求体对齐真实客户端（main.js pb()）：{require_usage:true, req_source:2}
+	req, err := http.NewRequest(http.MethodPost, c.ugBase()+EpEntUsage,
+		bytes.NewReader([]byte(`{"require_usage":true,"req_source":2}`)))
 	if err != nil {
 		return 0, 0, 0, 0, err
 	}

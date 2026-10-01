@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -195,16 +196,23 @@ func (h *Handler) importFromCallback(req importRequest) (*auth.Auth, error) {
 	}
 	// 补设备身份：签到 claim 必须带 X-Device-Id（缺失 → 上游 9004）。
 	// 粘贴导入无法得知原登录的设备对，生成新对随凭证落盘；
-	// 若上游校验设备绑定（9074），用面板「添加账号」重登即可重新注册。
+	// 随机设备对未在上游注册，claim 可能被 9074 拒——面板「添加账号」重登
+	// 或导入时以真实客户端设备号覆盖（x-device-id 为 16 位纯数字）。
+	genDev := false
 	if a.MachineID == "" {
 		if mid, rerr := randomHex(16); rerr == nil {
 			a.MachineID = mid
+			genDev = true
 		}
 	}
 	if a.DeviceID == "" {
 		if did, rerr := randomHex(16); rerr == nil {
 			a.DeviceID = did
+			genDev = true
 		}
+	}
+	if genDev {
+		log.Printf("import: uid=%s 设备对为随机生成（未在上游注册），签到 claim 可能被 9074 拒绝；建议面板重登或用真实设备号覆盖", a.UID)
 	}
 	return a, nil
 }
@@ -230,15 +238,21 @@ func (h *Handler) importFromJSON(req importRequest) (*auth.Auth, error) {
 		a.ApiHost = "https://api.trae.com.cn"
 	}
 	// 补设备身份（同 importFromCallback：缺失 → 签到 claim 9004）
+	genDev := false
 	if a.MachineID == "" {
 		if mid, rerr := randomHex(16); rerr == nil {
 			a.MachineID = mid
+			genDev = true
 		}
 	}
 	if a.DeviceID == "" {
 		if did, rerr := randomHex(16); rerr == nil {
 			a.DeviceID = did
+			genDev = true
 		}
+	}
+	if genDev {
+		log.Printf("import: uid=%s 设备对为随机生成（未在上游注册），签到 claim 可能被 9074 拒绝；建议面板重登或用真实设备号覆盖", a.UID)
 	}
 	return a, nil
 }

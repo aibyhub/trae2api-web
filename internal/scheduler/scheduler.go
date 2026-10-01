@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"log"
-	"strings"
 	"time"
 
 	"trae2api-web/internal/pool"
@@ -116,22 +115,16 @@ func (s *Scheduler) CheckinUID(uid string) Result {
 		res.Status = "checkin_off"
 		log.Printf("checkin %s: checkin disabled upstream", uid)
 	default:
-		// 9074 是「设备号无效」与「高峰限流」共用的码：短间隔重试 2 次。
-		// 设备无效时重试快速失败无害；高峰限流时重试大概率命中（上游有 checkin_retry 先例）。
-		for attempt := 0; ; attempt++ {
-			if claimErr := s.cfg.Upstream.CheckinClaim(a); claimErr != nil {
-				res.Status = "error"
-				res.Error = claimErr.Error()
-				log.Printf("checkin claim %s: %v", uid, claimErr)
-				if attempt < 2 && strings.Contains(claimErr.Error(), "9074") {
-					time.Sleep(2 * time.Second)
-					continue
-				}
-			} else {
-				res.Status = "claimed"
-				log.Printf("checkin %s: ok", uid)
-			}
-			break
+		// 9074「当前参与用户太多」实测为确定性反滥用拒绝（22:27 非整点三次重试
+		// 结果完全一致、同 host 读接口正常），重放无意义——单次失败即返回，
+		// 让错误原样暴露给面板（协议对齐修复见 upstream.UgHeaders/ugCheckinBody）。
+		if claimErr := s.cfg.Upstream.CheckinClaim(a); claimErr != nil {
+			res.Status = "error"
+			res.Error = claimErr.Error()
+			log.Printf("checkin claim %s: %v", uid, claimErr)
+		} else {
+			res.Status = "claimed"
+			log.Printf("checkin %s: ok", uid)
 		}
 	}
 	// 查积分 + 解冻（无论签到结果，冷却账号按最新积分判断解冻）

@@ -290,14 +290,29 @@ func TestUserEntUsageAggregation(t *testing.T) {
 
 func TestCheckinStatusAndClaim(t *testing.T) {
 	var path string
+	var body []byte
 	c := testClient(func(r *http.Request) (*http.Response, error) {
 		path = r.URL.Path
-		if r.Header.Get("X-User-Region") != "CN" {
-			return nil, errors.New("missing X-User-Region")
+		body, _ = io.ReadAll(r.Body)
+		// UG 头集对齐真实客户端（main.js cb()+fb()）：
+		// 7 头必须齐；X-User-Region/X-Machine-Id 真实客户端不发，多发即指纹偏离
+		if r.Header.Get("Content-Type") != "application/json" {
+			return nil, errors.New("missing Content-Type")
+		}
+		if r.Header.Get("Authorization") != "Cloud-IDE-JWT at" {
+			return nil, errors.New("missing auth header")
+		}
+		for _, h := range []string{"X-Device-Id", "X-Device-Brand", "X-Device-Type", "X-OS-Version", "X-App-Version"} {
+			if r.Header.Get(h) == "" {
+				return nil, errors.New("missing " + h)
+			}
+		}
+		if r.Header.Get("X-User-Region") != "" || r.Header.Get("X-Machine-Id") != "" {
+			return nil, errors.New("real client does not send X-User-Region/X-Machine-Id on UG channel")
 		}
 		return jsonResp(200, `{"checked_in":false,"credits":200,"enable":true}`), nil
 	})
-	checkedIn, credits, enable, err := c.CheckinStatus(&auth.Auth{AccessToken: "at"})
+	checkedIn, credits, enable, err := c.CheckinStatus(&auth.Auth{AccessToken: "at", DeviceID: "4003784254113003"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -306,5 +321,8 @@ func TestCheckinStatusAndClaim(t *testing.T) {
 	}
 	if path != EpCheckinStatus {
 		t.Errorf("path=%s", path)
+	}
+	if !bytes.Contains(body, []byte(`"req_source":2`)) {
+		t.Errorf("checkin body=%s want req_source=2 (SOLO_Lite)", body)
 	}
 }
