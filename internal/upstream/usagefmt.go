@@ -3,8 +3,10 @@
 package upstream
 
 // NormalizeUsage 补齐 OpenAI 标准字段（就地补，不丢上游原字段）：
-//   - prompt_tokens_details.cached_tokens    ← cache_read_input_tokens
-//   - completion_tokens_details.reasoning_tokens ← reasoning_tokens
+//   - usage.prompt_tokens_details.cached_tokens        ← cache_read_input_tokens
+//   - usage.completion_tokens_details.reasoning_tokens ← reasoning_tokens
+//
+// 两个 details 对象始终存在（值可为 0），保证与 OpenAI 标准响应结构一致。
 func NormalizeUsage(u map[string]any) map[string]any {
 	if u == nil {
 		return nil
@@ -15,15 +17,21 @@ func NormalizeUsage(u map[string]any) map[string]any {
 		}
 		return 0
 	}
-	if _, ok := u["prompt_tokens_details"]; !ok {
-		if cr := g("cache_read_input_tokens"); cr > 0 {
-			u["prompt_tokens_details"] = map[string]any{"cached_tokens": cr}
-		}
+	ptd, ok := u["prompt_tokens_details"].(map[string]any)
+	if !ok {
+		ptd = map[string]any{}
+		u["prompt_tokens_details"] = ptd
 	}
-	if _, ok := u["completion_tokens_details"]; !ok {
-		if rt := g("reasoning_tokens"); rt > 0 {
-			u["completion_tokens_details"] = map[string]any{"reasoning_tokens": rt}
-		}
+	if _, ok := ptd["cached_tokens"]; !ok {
+		ptd["cached_tokens"] = g("cache_read_input_tokens")
+	}
+	ctd, ok := u["completion_tokens_details"].(map[string]any)
+	if !ok {
+		ctd = map[string]any{}
+		u["completion_tokens_details"] = ctd
+	}
+	if _, ok := ctd["reasoning_tokens"]; !ok {
+		ctd["reasoning_tokens"] = g("reasoning_tokens")
 	}
 	return u
 }

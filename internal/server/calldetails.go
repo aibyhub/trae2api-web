@@ -134,6 +134,49 @@ func truncateStr(s string, n int) string {
 	return s[:n]
 }
 
+// archiveBody 归档用请求体裁剪：逐条消息限制文本长度，保证输出始终是
+// 合法 JSON（面板可直接解析展示）；超限文本以「…(归档截断)」标记。
+func archiveBody(body []byte) string {
+	const maxText = 20000
+	var obj map[string]any
+	if json.Unmarshal(body, &obj) != nil {
+		return truncateStr(string(body), 512<<10)
+	}
+	if msgs, ok := obj["messages"].([]any); ok {
+		for _, mi := range msgs {
+			m, ok := mi.(map[string]any)
+			if !ok {
+				continue
+			}
+			switch c := m["content"].(type) {
+			case string:
+				if len(c) > maxText {
+					m["content"] = c[:maxText] + "…(归档截断)"
+				}
+			case []any:
+				for _, part := range c {
+					if pm, ok := part.(map[string]any); ok {
+						if t, _ := pm["type"].(string); t == "text" {
+							if txt, ok := pm["text"].(string); ok && len(txt) > maxText {
+								pm["text"] = txt[:maxText] + "…(归档截断)"
+							}
+						}
+					}
+				}
+			}
+		}
+		obj["messages"] = msgs
+	}
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return truncateStr(string(body), 512<<10)
+	}
+	if len(out) > 512<<10 {
+		return truncateStr(string(out), 512<<10)
+	}
+	return string(out)
+}
+
 // Days 列出现存的日期（面板提示用，时间降序）。
 func (s *DetailStore) Days() []string {
 	entries, err := os.ReadDir(s.dir)

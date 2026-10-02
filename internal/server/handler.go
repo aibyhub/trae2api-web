@@ -471,7 +471,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			Cost:             round2(float64(total) * rate),
 			DurationMs:       time.Since(start).Milliseconds(),
 		})
-		// 调用明细存档（30 天）：上游请求参数 + 返回内容 + 系统提示词
+		// 调用明细存档（30 天）：上游请求参数（保结构截断）+ 返回内容 + 系统提示词
 		respUsage := recUsage
 		if respUsage != nil {
 			respUsage = upstream.NormalizeUsage(respUsage)
@@ -481,7 +481,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			UID:                recUID,
 			Model:              configName,
 			UpstreamURL:        h.cfg.Upstream.AgentHost + upstream.EpChat,
-			RequestBody:        truncateStr(string(upstream.PrepareBody(body)), 512<<10),
+			RequestBody:        archiveBody(upstream.PrepareBody(body)),
 			SystemPrompt:       truncateStr(extractSystemPrompt(body), 32<<10),
 			ResponseContent:    truncateStr(recContent.String(), 256<<10),
 			ResponseReasoning:  truncateStr(recReasoning.String(), 256<<10),
@@ -567,7 +567,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			h.cfg.Pool.NoteSuccess(acct.UID)
 			// 流内业务错误（1005 plan/5xx 等）→ 冷却账号，错误信息注入 SSE。
 			var streamErrMsg string
-			_ = upstream.StreamWithHooks(w, rc, func(se *upstream.SOLOStreamError) {
+			_ = upstream.StreamWithHooks(w, rc, configName, func(se *upstream.SOLOStreamError) {
 				h.handleStreamError(acct.UID, se)
 				streamErrMsg = fmt.Sprintf("code=%d %s", se.Code, se.Msg)
 			}, func(m map[string]any) { recUsage = m }, func(delta map[string]any) {
@@ -586,7 +586,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
-		resp, err := upstream.Aggregate(rc)
+		resp, err := upstream.Aggregate(rc, configName)
 		rc.Close() // 已完全消费，立即释放上游连接（防轮转 continue 泄漏 body）
 		if err != nil {
 			// 流内业务错误（如 1005 plan 权益不足）→ 冷却账号并轮转下一账号。

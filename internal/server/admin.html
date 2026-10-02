@@ -775,20 +775,17 @@ async function showUsageDetail(ts, uid, day){
     const d = await r.json();
     if(!r.ok){ showModal('调用明细', '<div style="color:var(--bad)">'+esc(d.error?.message||'加载失败')+'</div>'); return; }
     const u = d.usage||{};
-    let sysPrompt = '';
-    try{
-      const req = JSON.parse(d.request_body||'{}');
-      const msgs = req.messages||[];
-      if(msgs.length && msgs[0].role==='system'){
-        const c = msgs[0].content;
-        sysPrompt = typeof c==='string' ? c : (Array.isArray(c)? c.map(x=>x.text||'').join('\n') : '');
-      }
-    }catch(e){}
+    // 系统提示词：优先用服务端单独提取的字段；请求体展示带容错（超长归档可能截断）
+    let sysPrompt = d.system_prompt || '';
+    let reqBodyText = d.request_body || '';
+    let reqBodyPretty = reqBodyText;
+    try{ reqBodyPretty = JSON.stringify(JSON.parse(reqBodyText), null, 2); }
+    catch(e){ reqBodyPretty = reqBodyText + '\n…(归档截断，非完整 JSON)'; }
     const sec = (t, pre) => '<div style="margin-top:12px"><div class="muted" style="margin-bottom:4px">'+t+'</div><pre style="max-height:260px;overflow:auto">'+esc(pre||'(空)')+'</pre></div>';
     showModal('调用明细 — '+(d.model||'')+'（'+(d.status==='ok'?'成功':'失败')+'，'+(d.duration_ms||0)+'ms）',
       '<div class="muted">上游接口：<span class="mono">'+esc(d.upstream_url||'-')+'</span></div>'
       + sec('系统提示词（注入后，随请求发送）', sysPrompt)
-      + sec('发给上游的请求体', JSON.stringify((()=>{try{return JSON.parse(d.request_body||'{}')}catch(e){return {}}})(), null, 2))
+      + sec('发给上游的请求体（超长消息已归档截断）', reqBodyPretty)
       + sec('返回正文', d.response_content||'(空)')
       + sec('返回 usage', JSON.stringify(u, null, 2))
       + (d.response_reasoning? sec('思考过程', d.response_reasoning):''));

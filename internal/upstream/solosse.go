@@ -140,7 +140,7 @@ func scanLine(st *sseState, line string) *SOLOEvent {
 
 // Aggregate 读取完整 SOLO SSE，聚合 response + reasoning + tool_calls + usage，
 // 产出单个 OpenAI chat.completion（非流式）。
-func Aggregate(r io.Reader) (map[string]any, error) {
+func Aggregate(r io.Reader, model string) (map[string]any, error) {
 	br := bufio.NewReaderSize(r, 64*1024)
 	var (
 		id           string
@@ -305,23 +305,23 @@ func sortInts(a []int) {
 // Stream 流式转换：SOLO SSE → OpenAI SSE chunk，每 chunk flush，保证至少一个 [DONE]。
 // 调用方必须先设置过 status 200；本函数自设 SSE headers。
 func Stream(w http.ResponseWriter, r io.Reader) error {
-	return streamOpts(w, r, nil, nil, nil)
+	return streamOpts(w, r, "", nil, nil, nil)
 }
 
 // StreamWithError 同 Stream，额外在遇到上游 event:error 时回调 onErr（非 nil），
 // 供调用方冷却账号/记录日志；错误信息同时注入 SSE 事件流。
 func StreamWithError(w http.ResponseWriter, r io.Reader, onErr func(*SOLOStreamError)) error {
-	return streamOpts(w, r, onErr, nil, nil)
+	return streamOpts(w, r, "", onErr, nil, nil)
 }
 
 // StreamWithHooks 全量钩子版本：onErr（流内业务错误）、onUsage（token_usage
 // 事件）、onDelta（output 正文增量）——供调用明细存档正文与 tokens。
-func StreamWithHooks(w http.ResponseWriter, r io.Reader, onErr func(*SOLOStreamError), onUsage func(map[string]any), onDelta func(map[string]any)) error {
-	return streamOpts(w, r, onErr, onUsage, onDelta)
+func StreamWithHooks(w http.ResponseWriter, r io.Reader, model string, onErr func(*SOLOStreamError), onUsage func(map[string]any), onDelta func(map[string]any)) error {
+	return streamOpts(w, r, model, onErr, onUsage, onDelta)
 }
 
 // streamOpts Stream 的可选参数版本。
-func streamOpts(w http.ResponseWriter, r io.Reader, onErr func(*SOLOStreamError), onUsage func(map[string]any), onDelta func(map[string]any)) error {
+func streamOpts(w http.ResponseWriter, r io.Reader, model string, onErr func(*SOLOStreamError), onUsage func(map[string]any), onDelta func(map[string]any)) error {
 	h := w.Header()
 	h.Set("Content-Type", "text/event-stream")
 	h.Set("Cache-Control", "no-cache")
@@ -339,7 +339,7 @@ func streamOpts(w http.ResponseWriter, r io.Reader, onErr func(*SOLOStreamError)
 			"id":      id,
 			"object":  "chat.completion.chunk",
 			"created": time.Now().Unix(),
-			"model":   "",
+			"model":   model,
 			"choices": []any{
 				map[string]any{
 					"index": 0,
