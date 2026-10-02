@@ -30,6 +30,8 @@ type UsageEntry struct {
 	PromptTokens     int64   `json:"prompt_tokens,omitempty"`
 	CompletionTokens int64   `json:"completion_tokens,omitempty"`
 	TotalTokens      int64   `json:"total_tokens,omitempty"`
+	CacheRead        int64   `json:"cache_read,omitempty"`         // 提示词缓存命中 tokens
+	CacheCreation    int64   `json:"cache_creation,omitempty"`     // 缓存创建 tokens
 	Rate             float64 `json:"rate"`
 	Cost             float64 `json:"cost"` // total_tokens × rate（相对估算）
 	DurationMs       int64   `json:"duration_ms"`
@@ -277,10 +279,11 @@ func sortEntriesByTimeDesc(es []UsageEntry) {
 	sort.Slice(es, func(i, j int) bool { return es[i].TS > es[j].TS })
 }
 
-// parseTokenUsage 解析上游 token_usage（Anthropic 风格键为主，兼容 OpenAI 风格）。
-func parseTokenUsage(m map[string]any) (prompt, completion, total int64) {
+// parseTokenUsage 解析上游 token_usage（Anthropic 风格键为主，兼容 OpenAI 风格），
+// 并带出提示词缓存的创建/命中 tokens。
+func parseTokenUsage(m map[string]any) (prompt, completion, total, cacheRead, cacheCreation int64) {
 	if m == nil {
-		return 0, 0, 0
+		return 0, 0, 0, 0, 0
 	}
 	g := func(keys ...string) int64 {
 		for _, k := range keys {
@@ -293,10 +296,12 @@ func parseTokenUsage(m map[string]any) (prompt, completion, total int64) {
 	prompt = g("input_tokens", "prompt_tokens")
 	completion = g("output_tokens", "completion_tokens")
 	total = g("total_tokens")
+	cacheRead = g("cache_read_input_tokens")
+	cacheCreation = g("cache_creation_input_tokens")
 	if total < prompt+completion {
 		total = prompt + completion
 	}
-	return prompt, completion, total
+	return prompt, completion, total, cacheRead, cacheCreation
 }
 
 // ---------------------------------------------------------------------------
@@ -312,6 +317,7 @@ type usageAgg struct {
 	Prompt     int64   `json:"prompt_tokens"`
 	Completion int64   `json:"completion_tokens"`
 	Total      int64   `json:"total_tokens"`
+	CacheRead  int64   `json:"cache_read"` // 提示词缓存命中 tokens
 	Cost       float64 `json:"cost"`
 	AvgLatency int64   `json:"avg_latency_ms"`
 	Rate       float64 `json:"rate,omitempty"`
@@ -346,6 +352,7 @@ func (h *Handler) adminUsage(w http.ResponseWriter, r *http.Request) {
 		totals.Prompt += e.PromptTokens
 		totals.Completion += e.CompletionTokens
 		totals.Total += e.TotalTokens
+		totals.CacheRead += e.CacheRead
 		totals.Cost += e.Cost
 		totals.AvgLatency += e.DurationMs
 		if e.Status != "ok" {
@@ -360,6 +367,7 @@ func (h *Handler) adminUsage(w http.ResponseWriter, r *http.Request) {
 		acc.Prompt += e.PromptTokens
 		acc.Completion += e.CompletionTokens
 		acc.Total += e.TotalTokens
+		acc.CacheRead += e.CacheRead
 		acc.Cost += e.Cost
 		acc.AvgLatency += e.DurationMs
 		if e.Status != "ok" {
@@ -374,6 +382,7 @@ func (h *Handler) adminUsage(w http.ResponseWriter, r *http.Request) {
 		mm.Prompt += e.PromptTokens
 		mm.Completion += e.CompletionTokens
 		mm.Total += e.TotalTokens
+		mm.CacheRead += e.CacheRead
 		mm.Cost += e.Cost
 		mm.AvgLatency += e.DurationMs
 		if e.Status != "ok" {
@@ -432,6 +441,26 @@ func (h *Handler) nicknameFor(uid string) string {
 // （free-stack/combo，无独立倍率）与内部工具模型（summary = 会话标题生成）。
 // 上游 is_invisible_to_user 对它们不生效（字段缺失），按 id 显式剔除。
 var drNonOfficialModels = map[string]bool{"free-stack": true, "combo": true, "summary": true}
+
+// adminUsageDetail GET /admin/api/usage/detail?day=YYYY-MM-DD&ts=<unix ms>&uid=<uid>：
+// 返回单笔请求的完整明细（上游请求参数、返回内容、系统提示词）。
+func (h *Handler) adminUsageDetail(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	day, ts, uid := q.Get("day"), q.Get("ts"), q.Get("uid")
+	var tsN int64
+	if n, err := strconv.ParseInt(ts, 10, 64); err == nil {
+		tsN = n
+	}
+	if day == "" && tsN > 0 {
+		day = time.UnixMilli(tsN).Format("2006-01-02")
+	}
+	d, err := h.details.Get(day, tsN, uid)
+	if err != nil {
+		writeOpenAIError(w, http.StatusNotFound, "not_found", "明细不存在或已过保留期（30 天）")
+		return
+	}
+	writeJSON(w, http.StatusOK, d)
+}
 
 // adminRatesGet GET /admin/api/rates：官方模型倍率表（get_detail_param
 // display_contact_config.consumption_rate，上游定义，只读）。

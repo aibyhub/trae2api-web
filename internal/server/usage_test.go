@@ -42,20 +42,21 @@ func TestUsageStoreToday(t *testing.T) {
 }
 
 func TestParseTokenUsage(t *testing.T) {
-	p, c, tot := parseTokenUsage(map[string]any{
+	p, c, tot, cr, cc := parseTokenUsage(map[string]any{
 		"input_tokens": float64(10), "output_tokens": float64(5),
 	})
-	if p != 10 || c != 5 || tot != 15 {
-		t.Fatalf("anthropic keys: %d %d %d", p, c, tot)
+	if p != 10 || c != 5 || tot != 15 || cr != 0 || cc != 0 {
+		t.Fatalf("anthropic keys: %d %d %d %d %d", p, c, tot, cr, cc)
 	}
-	p, c, tot = parseTokenUsage(map[string]any{
+	p, c, tot, cr, cc = parseTokenUsage(map[string]any{
 		"prompt_tokens": float64(7), "completion_tokens": float64(3), "total_tokens": float64(20),
+		"cache_read_input_tokens": float64(6), "cache_creation_input_tokens": float64(1),
 	})
-	if p != 7 || c != 3 || tot != 20 {
-		t.Fatalf("openai keys: %d %d %d", p, c, tot)
+	if p != 7 || c != 3 || tot != 20 || cr != 6 || cc != 1 {
+		t.Fatalf("openai keys: %d %d %d %d %d", p, c, tot, cr, cc)
 	}
-	p, c, tot = parseTokenUsage(nil)
-	if p != 0 || c != 0 || tot != 0 {
+	p, c, tot, cr, cc = parseTokenUsage(nil)
+	if p != 0 || c != 0 || tot != 0 || cr != 0 || cc != 0 {
 		t.Fatal("nil map should be zeros")
 	}
 }

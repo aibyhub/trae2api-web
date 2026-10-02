@@ -217,7 +217,7 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 		},
 	}
 	if usage != nil {
-		resp["usage"] = usage
+		resp["usage"] = NormalizeUsage(usage)
 	}
 	return resp, nil
 }
@@ -305,23 +305,23 @@ func sortInts(a []int) {
 // Stream 流式转换：SOLO SSE → OpenAI SSE chunk，每 chunk flush，保证至少一个 [DONE]。
 // 调用方必须先设置过 status 200；本函数自设 SSE headers。
 func Stream(w http.ResponseWriter, r io.Reader) error {
-	return streamOpts(w, r, nil, nil)
+	return streamOpts(w, r, nil, nil, nil)
 }
 
 // StreamWithError 同 Stream，额外在遇到上游 event:error 时回调 onErr（非 nil），
 // 供调用方冷却账号/记录日志；错误信息同时注入 SSE 事件流。
 func StreamWithError(w http.ResponseWriter, r io.Reader, onErr func(*SOLOStreamError)) error {
-	return streamOpts(w, r, onErr, nil)
+	return streamOpts(w, r, onErr, nil, nil)
 }
 
-// StreamWithErrorUsage 同 StreamWithError，额外在收到 token_usage 事件时回调
-// onUsage（非 nil），供使用日志记录 tokens。
-func StreamWithErrorUsage(w http.ResponseWriter, r io.Reader, onErr func(*SOLOStreamError), onUsage func(map[string]any)) error {
-	return streamOpts(w, r, onErr, onUsage)
+// StreamWithHooks 全量钩子版本：onErr（流内业务错误）、onUsage（token_usage
+// 事件）、onDelta（output 正文增量）——供调用明细存档正文与 tokens。
+func StreamWithHooks(w http.ResponseWriter, r io.Reader, onErr func(*SOLOStreamError), onUsage func(map[string]any), onDelta func(map[string]any)) error {
+	return streamOpts(w, r, onErr, onUsage, onDelta)
 }
 
 // streamOpts Stream 的可选参数版本。
-func streamOpts(w http.ResponseWriter, r io.Reader, onErr func(*SOLOStreamError), onUsage func(map[string]any)) error {
+func streamOpts(w http.ResponseWriter, r io.Reader, onErr func(*SOLOStreamError), onUsage func(map[string]any), onDelta func(map[string]any)) error {
 	h := w.Header()
 	h.Set("Content-Type", "text/event-stream")
 	h.Set("Cache-Control", "no-cache")
@@ -352,7 +352,7 @@ func streamOpts(w http.ResponseWriter, r io.Reader, onErr func(*SOLOStreamError)
 			choice["finish_reason"] = finish
 		}
 		if pendingUsage != nil {
-			chunk["usage"] = pendingUsage
+			chunk["usage"] = NormalizeUsage(pendingUsage)
 			pendingUsage = nil
 		}
 		raw, _ := json.Marshal(chunk)
@@ -408,6 +408,9 @@ func streamOpts(w http.ResponseWriter, r io.Reader, onErr func(*SOLOStreamError)
 					}
 				}
 				if len(delta) > 0 {
+					if onDelta != nil {
+						onDelta(delta)
+					}
 					if err := writeChunk(delta, ""); err != nil {
 						return err
 					}

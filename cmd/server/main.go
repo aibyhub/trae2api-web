@@ -90,6 +90,7 @@ func main() {
 		APIKey:       cfg.APIKey,
 		AuthDir:      cfg.AuthDir,
 		DataDir:      filepath.Dir(cfg.StateFile),
+		Prompt:       server.PromptConfig{Mode: cfg.Prompt.Mode, File: cfg.Prompt.File},
 		PlanCooldown: cfg.PlanCreditDur,
 		SoftCooldown: cfg.SoftRateDur,
 		ErrThreshold: cfg.Cooldown.ErrThresh,

@@ -701,12 +701,13 @@ function renderUsage(d){
   document.getElementById('usageByAcc').innerHTML = !accs.length
     ? '<div class="muted" style="padding:14px">该时间窗内暂无请求记录。</div>'
     : '<table class="accts"><thead><tr><th>账号</th><th class="num">请求</th><th class="num">失败</th>'
-      +'<th class="num">输入</th><th class="num">输出</th><th class="num">合计</th><th class="num">估算消耗</th><th class="num">均延迟</th></tr></thead><tbody>'
+      +'<th class="num">输入</th><th class="num">缓存命中</th><th class="num">输出</th><th class="num">合计</th><th class="num">估算消耗</th><th class="num">均延迟</th></tr></thead><tbody>'
       + accs.map(a=>'<tr>'
         + '<td><div class="nick">'+esc(a.label||'(未命名)')+'</div><div class="uid mono">'+esc(a.key)+'</div></td>'
         + '<td class="mono num">'+fmt(a.requests)+'</td>'
         + '<td class="mono num">'+(a.fails?'<span class="log-err">'+fmt(a.fails)+'</span>':'0')+'</td>'
         + '<td class="mono num">'+fmt(a.prompt_tokens)+'</td>'
+        + '<td class="mono num" style="color:'+(a.cache_read?'var(--ok)':'var(--dim)')+'">'+fmt(a.cache_read)+'</td>'
         + '<td class="mono num">'+fmt(a.completion_tokens)+'</td>'
         + '<td class="mono num">'+fmt(a.total_tokens)+'</td>'
         + '<td class="mono num">'+fmt2(a.cost)+'</td>'
@@ -717,7 +718,7 @@ function renderUsage(d){
   document.getElementById('usageByModel').innerHTML = !models.length
     ? '<div class="muted" style="padding:14px"></div>'
     : '<table class="accts"><thead><tr><th>模型</th><th class="num">官方倍率</th><th class="num">请求</th>'
-      +'<th class="num">输入</th><th class="num">输出</th><th class="num">合计</th><th class="num">估算消耗</th><th class="num">每 1M tokens</th></tr></thead><tbody>'
+      +'<th class="num">输入</th><th class="num">缓存命中</th><th class="num">输出</th><th class="num">合计</th><th class="num">估算消耗</th><th class="num">每 1M tokens</th></tr></thead><tbody>'
       + models.map(m=>{
           const per1m = m.total_tokens>0 ? fmt2(m.cost/(m.total_tokens/1000000)) : '-';
           return '<tr>'
@@ -725,12 +726,13 @@ function renderUsage(d){
         + '<td class="mono num">'+fmt2(m.rate)+'</td>'
         + '<td class="mono num">'+fmt(m.requests)+'</td>'
         + '<td class="mono num">'+fmt(m.prompt_tokens)+'</td>'
+        + '<td class="mono num" style="color:'+(m.cache_read?'var(--ok)':'var(--dim)')+'">'+fmt(m.cache_read)+'</td>'
         + '<td class="mono num">'+fmt(m.completion_tokens)+'</td>'
         + '<td class="mono num">'+fmt(m.total_tokens)+'</td>'
         + '<td class="mono num">'+fmt2(m.cost)+'</td>'
         + '<td class="mono num">'+per1m+'</td>'
         + '</tr>';}).join('') + '</tbody></table>';
-  // 明细：按账号分组
+  // 明细：按账号分组，行可点开完整明细（上游参数/返回正文/系统提示词）
   const groups = document.getElementById('usageGroups');
   const es = d.entries || [];
   if(!es.length){ groups.innerHTML = '<div class="muted" style="padding:14px"></div>'; return; }
@@ -743,24 +745,54 @@ function renderUsage(d){
     const meta = accs.find(a=>a.key===uid) || {};
     const rows = list.map(e=>{
       const st = e.status==='ok' ? '<span class="log-ok">成功</span>' : '<span class="log-err" title="'+esc(e.error||'')+'">失败</span>';
+      const day = new Date(e.ts).toISOString().slice(0,10);
+      const detailBtn = '<button class="btn sm" onclick="showUsageDetail('+e.ts+',\''+esc(uid)+'\',\''+day+'\')">明细</button>';
       return '<tr>'
         + '<td class="mono">'+esc(new Date(e.ts).toLocaleString())+'</td>'
         + '<td class="mono">'+esc(e.model||'-')+(e.stream?' <span class="muted">流</span>':'')+'</td>'
         + '<td class="mono num">'+fmt(e.prompt_tokens)+'</td>'
+        + '<td class="mono num" style="color:'+(e.cache_read?'var(--ok)':'var(--dim)')+'">'+fmt(e.cache_read||0)+'</td>'
         + '<td class="mono num">'+fmt(e.completion_tokens)+'</td>'
         + '<td class="mono num">'+fmt(e.total_tokens)+'</td>'
         + '<td class="mono num">'+fmt2(e.cost)+'</td>'
         + '<td class="mono num">'+fmt(e.duration_ms)+'ms</td>'
         + '<td>'+st+(e.error?'<div class="mono" style="max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(e.error)+'">'+esc(e.error)+'</div>':'')+'</td>'
+        + '<td>'+detailBtn+'</td>'
         + '</tr>';
     }).join('');
     return '<div class="panel" style="margin-bottom:14px"><h2>'+esc(meta.label||'(已删除账号)')+
       '<small style="color:var(--dim);font-weight:400;margin-left:8px" class="mono">'+esc(uid)+'</small></h2>'
       + '<div class="tblwrap"><table class="accts"><thead><tr>'
-      + '<th>时间</th><th>模型</th><th class="num">输入</th><th class="num">输出</th><th class="num">合计</th>'
-      + '<th class="num">消耗</th><th class="num">耗时</th><th>状态</th>'
+      + '<th>时间</th><th>模型</th><th class="num">输入</th><th class="num">缓存命中</th><th class="num">输出</th><th class="num">合计</th>'
+      + '<th class="num">消耗</th><th class="num">耗时</th><th>状态</th><th></th>'
       + '</tr></thead><tbody>'+rows+'</tbody></table></div></div>';
   }).join('');
+}
+async function showUsageDetail(ts, uid, day){
+  showModal('调用明细 — 加载中...', '<div class="muted" style="padding:14px"><span class="spin"></span> 加载中...</div>');
+  try{
+    const r = await fetch('/admin/api/usage/detail?day='+encodeURIComponent(day)+'&ts='+ts+'&uid='+encodeURIComponent(uid), {headers: authHeader(), cache:'no-store'});
+    const d = await r.json();
+    if(!r.ok){ showModal('调用明细', '<div style="color:var(--bad)">'+esc(d.error?.message||'加载失败')+'</div>'); return; }
+    const u = d.usage||{};
+    let sysPrompt = '';
+    try{
+      const req = JSON.parse(d.request_body||'{}');
+      const msgs = req.messages||[];
+      if(msgs.length && msgs[0].role==='system'){
+        const c = msgs[0].content;
+        sysPrompt = typeof c==='string' ? c : (Array.isArray(c)? c.map(x=>x.text||'').join('\n') : '');
+      }
+    }catch(e){}
+    const sec = (t, pre) => '<div style="margin-top:12px"><div class="muted" style="margin-bottom:4px">'+t+'</div><pre style="max-height:260px;overflow:auto">'+esc(pre||'(空)')+'</pre></div>';
+    showModal('调用明细 — '+(d.model||'')+'（'+(d.status==='ok'?'成功':'失败')+'，'+(d.duration_ms||0)+'ms）',
+      '<div class="muted">上游接口：<span class="mono">'+esc(d.upstream_url||'-')+'</span></div>'
+      + sec('系统提示词（注入后，随请求发送）', sysPrompt)
+      + sec('发给上游的请求体', JSON.stringify((()=>{try{return JSON.parse(d.request_body||'{}')}catch(e){return {}}})(), null, 2))
+      + sec('返回正文', d.response_content||'(空)')
+      + sec('返回 usage', JSON.stringify(u, null, 2))
+      + (d.response_reasoning? sec('思考过程', d.response_reasoning):''));
+  }catch(e){ showModal('调用明细', '<div style="color:var(--bad)">加载失败：'+esc(e.message)+'</div>'); }
 }
 
 /* ─── 官方倍率（上游定义，只读） ─── */

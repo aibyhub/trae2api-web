@@ -46,6 +46,9 @@ type Config struct {
 	AdminPassword string
 	// LogRetentionDays 日志保留天数（usage.jsonl / checkin.jsonl）；0 = 关闭自动清理。
 	LogRetentionDays int
+	// Prompt 系统提示词策略：Mode "trae"（注入固定提示词，默认）/"off"（透传）；
+	// File 自定义提示词文件（相对 data/ 或绝对路径），非空时覆盖内置提示词。
+	Prompt PromptConfig
 }
 
 // maxBodyBytes 请求体大小上限（8MB），超过返回 413。
@@ -56,8 +59,12 @@ type Handler struct {
 	cfg Config
 	mux *http.ServeMux
 
-	usage   *UsageStore // 使用日志（每笔模型请求）
-	proxies *ProxyPool  // 代理池（账号按名称选用）
+	usage   *UsageStore  // 使用日志（每笔模型请求）
+	details *DetailStore // 调用明细存档（请求/返回/提示词，保留 30 天）
+	proxies *ProxyPool   // 代理池（账号按名称选用）
+
+	// prompt 系统提示词策略（Mode: "trae"=注入固定提示词，"off"=透传）。
+	prompt PromptConfig
 
 	// Web 登录 pending 态：pendingID → 登录进行中的临时上下文。
 	// 回调 /authorize 捕获后标记成功；面板轮询 result 取结果。
@@ -100,12 +107,16 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.DataDir == "" {
 		cfg.DataDir = "data"
 	}
+	if strings.TrimSpace(cfg.Prompt.Mode) == "" {
+		cfg.Prompt.Mode = "trae"
+	}
 	h := &Handler{
 		cfg:     cfg,
 		mux:     http.NewServeMux(),
 		logins:  map[string]*pendingLogin{},
 		admin:   adminAuth{fails: map[string][]time.Time{}},
 		usage:   NewUsageStore(filepath.Join(cfg.DataDir, "usage.jsonl")),
+		details: NewDetailStore(filepath.Join(cfg.DataDir, "call-details")),
 		proxies: NewProxyPool(filepath.Join(cfg.DataDir, "proxies.json")),
 	}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
@@ -147,6 +158,7 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("POST /admin/api/logs/prune", h.withAdminAuth(h.adminLogsPrune))
 	// 使用日志 + 官方模型倍率 + 代理池
 	h.mux.HandleFunc("GET /admin/api/usage", h.adminUsage)
+	h.mux.HandleFunc("GET /admin/api/usage/detail", h.withAdminAuth(h.adminUsageDetail))
 	h.mux.HandleFunc("GET /admin/api/rates", h.adminRatesGet)
 	h.mux.HandleFunc("GET /admin/api/proxies", h.withAdminAuth(h.adminProxiesGet))
 	h.mux.HandleFunc("POST /admin/api/proxies", h.withAdminAuth(h.adminProxiesAdd))
@@ -431,14 +443,18 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body = setModelInBody(body, configName)
+	// 系统提示词策略：统一注入固定的 Trae 风格提示词（单一 system，不叠加），
+	// 让上游看到的请求前缀稳定 → 提示词缓存可跨请求命中 + 指纹一致。
+	body = applyPromptPolicy(body, h.cfg.Prompt, h.cfg.DataDir)
 
 	// 使用日志：每笔请求一条（成功/失败都记），官方倍率 → 相对消耗
 	start := time.Now()
 	rate := h.modelRate(configName)
 	var recUID string
 	var recUsage map[string]any
+	var recContent, recReasoning strings.Builder
 	record := func(status, errMsg string) {
-		p, comp, total := parseTokenUsage(recUsage)
+		p, comp, total, cRead, cCreate := parseTokenUsage(recUsage)
 		h.usage.Add(UsageEntry{
 			TS:               time.Now().UnixMilli(),
 			UID:              recUID,
@@ -449,9 +465,30 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			PromptTokens:     p,
 			CompletionTokens: comp,
 			TotalTokens:      total,
+			CacheRead:        cRead,
+			CacheCreation:    cCreate,
 			Rate:             rate,
 			Cost:             round2(float64(total) * rate),
 			DurationMs:       time.Since(start).Milliseconds(),
+		})
+		// 调用明细存档（30 天）：上游请求参数 + 返回内容 + 系统提示词
+		respUsage := recUsage
+		if respUsage != nil {
+			respUsage = upstream.NormalizeUsage(respUsage)
+		}
+		h.details.Add(CallDetail{
+			TS:                 time.Now().UnixMilli(),
+			UID:                recUID,
+			Model:              configName,
+			UpstreamURL:        h.cfg.Upstream.AgentHost + upstream.EpChat,
+			RequestBody:        truncateStr(string(upstream.PrepareBody(body)), 512<<10),
+			SystemPrompt:       truncateStr(extractSystemPrompt(body), 32<<10),
+			ResponseContent:    truncateStr(recContent.String(), 256<<10),
+			ResponseReasoning:  truncateStr(recReasoning.String(), 256<<10),
+			Usage:              respUsage,
+			Status:             status,
+			Error:              errMsg,
+			DurationMs:         time.Since(start).Milliseconds(),
 		})
 	}
 
@@ -530,10 +567,17 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			h.cfg.Pool.NoteSuccess(acct.UID)
 			// 流内业务错误（1005 plan/5xx 等）→ 冷却账号，错误信息注入 SSE。
 			var streamErrMsg string
-			_ = upstream.StreamWithErrorUsage(w, rc, func(se *upstream.SOLOStreamError) {
+			_ = upstream.StreamWithHooks(w, rc, func(se *upstream.SOLOStreamError) {
 				h.handleStreamError(acct.UID, se)
 				streamErrMsg = fmt.Sprintf("code=%d %s", se.Code, se.Msg)
-			}, func(m map[string]any) { recUsage = m })
+			}, func(m map[string]any) { recUsage = m }, func(delta map[string]any) {
+				if c, ok := delta["content"].(string); ok {
+					recContent.WriteString(c)
+				}
+				if r, ok := delta["reasoning_content"].(string); ok {
+					recReasoning.WriteString(r)
+				}
+			})
 			rc.Close()
 			if streamErrMsg != "" {
 				record("error", streamErrMsg)
@@ -563,6 +607,19 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		h.cfg.Pool.NoteSuccess(acct.UID)
 		if u, ok := resp["usage"].(map[string]any); ok {
 			recUsage = u
+		}
+		// 非流式：抓返回正文供调用明细存档
+		if choices, ok := resp["choices"].([]any); ok && len(choices) > 0 {
+			if ch, ok := choices[0].(map[string]any); ok {
+				if msg, ok := ch["message"].(map[string]any); ok {
+					if c, ok := msg["content"].(string); ok {
+						recContent.WriteString(c)
+					}
+					if r, ok := msg["reasoning_content"].(string); ok {
+						recReasoning.WriteString(r)
+					}
+				}
+			}
 		}
 		record("ok", "")
 		writeJSON(w, http.StatusOK, resp)

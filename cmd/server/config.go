@@ -22,6 +22,11 @@ type Config struct {
 	StateFile     string `json:"state_file"`    // "./data/state.json"
 	DefaultModel  string `json:"default_model"` // "glm-5.2"
 
+	Prompt struct {
+		Mode string `json:"prompt_mode"` // "trae" = 注入固定提示词（默认）；"off" = 透传
+		File string `json:"prompt_file"` // 自定义提示词文件（相对 data/ 或绝对路径）
+	} `json:"prompt"`
+
 	Cooldown struct {
 		PlanCredit  string `json:"plan_credit"`   // "12h"
 		SoftRate    string `json:"soft_rate"`     // "60s"
@@ -72,6 +77,7 @@ func Default() *Config {
 	c.Schedule.CheckinHours = []int{9}
 	c.Schedule.RefreshHours = []int{3}
 	c.Schedule.BalanceRefreshMin = 30
+	c.Prompt.Mode = "trae"
 	c.Upstream.TimeoutSeconds = 120
 	c.LogRetentionDays = 90
 	c.CheckinNotify = "fail"
@@ -165,6 +171,12 @@ func applyEnv(c *Config) {
 		if n, err := strconv.Atoi(v); err == nil {
 			c.Schedule.JitterMinutes = n
 		}
+	}
+	if v := os.Getenv("TW2A_PROMPT_MODE"); v != "" {
+		c.Prompt.Mode = v
+	}
+	if v := os.Getenv("TW2A_PROMPT_FILE"); v != "" {
+		c.Prompt.File = v
 	}
 	if v := os.Getenv("TW2A_LOG_RETENTION_DAYS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
