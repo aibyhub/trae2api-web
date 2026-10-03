@@ -108,7 +108,7 @@ func NewHandler(cfg Config) *Handler {
 		cfg.DataDir = "data"
 	}
 	if strings.TrimSpace(cfg.Prompt.Mode) == "" {
-		cfg.Prompt.Mode = "trae"
+		cfg.Prompt.Mode = "auto"
 	}
 	h := &Handler{
 		cfg:     cfg,

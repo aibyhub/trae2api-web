@@ -55,7 +55,7 @@ const defaultSystemPrompt = `你是 Trae，一款 AI IDE 内置的智能编程�
 
 // PromptConfig 提示词策略配置。
 type PromptConfig struct {
-	Mode string // "trae" = 注入固定提示词（默认）；"off" = 完全透传
+	Mode string // "auto"（默认）= 调用方有 system 则透传、无则注入；"trae" = 总是注入；"off" = 总是透传
 	File string // 自定义提示词文件路径；空 = 内置默认
 }
 
@@ -73,15 +73,19 @@ func fixedPrompt(cfg PromptConfig, dataDir string) string {
 	return defaultSystemPrompt
 }
 
-// applyPromptPolicy 把请求体改写为「恰好一条 system 消息」：
-// 内容 = 固定提示词 ＋（调用方所有 system 非空且不同时）追加的「用户附加指令」段。
-// 调用方的多条 system 一并合并，绝不多份叠加。无 system 时仅用固定提示词。
-// mode=off 时原样返回。
+// applyPromptPolicy 系统提示词策略（默认 auto）：
+//
+//	auto：调用方自带 system（agent 框架如 DeepSeek Harness/Cline）→ 原样透传，
+//	      不注入不叠加（它们的提示词本身就是稳定的缓存前缀；叠加两套 agent
+//	      提示词会导致行为混乱且成倍浪费 token）。裸调用（无 system）→ 注入
+//	      固定的 Trae 风格提示词补足身份与行为基线。
+//	trae：总是注入（调用方 system 合并为「用户附加指令」段）——指纹最大化。
+//	off ：总是透传。
 func applyPromptPolicy(body []byte, cfg PromptConfig, dataDir string) []byte {
-	if strings.EqualFold(strings.TrimSpace(cfg.Mode), "off") {
+	mode := strings.ToLower(strings.TrimSpace(cfg.Mode))
+	if mode == "off" {
 		return body
 	}
-	fixed := fixedPrompt(cfg, dataDir)
 	var obj map[string]any
 	if err := json.Unmarshal(body, &obj); err != nil {
 		return body
@@ -90,7 +94,7 @@ func applyPromptPolicy(body []byte, cfg PromptConfig, dataDir string) []byte {
 	if !ok {
 		return body
 	}
-	// 收集调用方全部 system 文本，其余消息原样保留（保持顺序）
+	// 收集调用方全部 system 文本；其余消息原样保留（保持顺序）
 	var callerSys []string
 	kept := make([]any, 0, len(msgs))
 	for _, mi := range msgs {
@@ -100,16 +104,27 @@ func applyPromptPolicy(body []byte, cfg PromptConfig, dataDir string) []byte {
 			continue
 		}
 		if role, _ := m["role"].(string); role == "system" {
-			if s := strings.TrimSpace(extractMessageText(m["content"])); s != "" && s != fixed {
+			if s := strings.TrimSpace(extractMessageText(m["content"])); s != "" {
 				callerSys = append(callerSys, s)
 			}
-			continue // system 统一移除，末尾合并为一条
+			continue
 		}
 		kept = append(kept, mi)
 	}
+	hasCallerSystem := len(callerSys) > 0
+	if mode == "auto" && hasCallerSystem {
+		// agent 调用方：保留其原 system（不注入、不叠加、不浪费 token）
+		obj["messages"] = msgs
+		return body
+	}
+	fixed := fixedPrompt(cfg, dataDir)
 	merged := fixed
-	for _, s := range callerSys {
-		merged += "\n\n# 用户附加指令\n\n" + s
+	if mode == "trae" {
+		for _, s := range callerSys {
+			if s != fixed {
+				merged += "\n\n# 用户附加指令\n\n" + s
+			}
+		}
 	}
 	obj["messages"] = append([]any{map[string]any{"role": "system", "content": merged}}, kept...)
 	out, err := json.Marshal(obj)

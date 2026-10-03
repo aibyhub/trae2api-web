@@ -77,7 +77,7 @@ func Default() *Config {
 	c.Schedule.CheckinHours = []int{9}
 	c.Schedule.RefreshHours = []int{3}
 	c.Schedule.BalanceRefreshMin = 30
-	c.Prompt.Mode = "trae"
+	c.Prompt.Mode = "auto"
 	c.Upstream.TimeoutSeconds = 120
 	c.LogRetentionDays = 90
 	c.CheckinNotify = "fail"

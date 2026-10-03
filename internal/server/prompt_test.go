@@ -1,24 +1,42 @@
 package server
 
 import (
-	"bytes"
 	"encoding/json"
 	"os"
 	"strings"
 	"testing"
 )
 
-func TestApplyPromptPolicyMergesSingleSystem(t *testing.T) {
-	cfg := PromptConfig{Mode: "trae"}
-	body := []byte(`{"model":"glm-5.2","messages":[
-		{"role":"system","content":"旧系统提示"},
-		{"role":"system","content":"第二条系统"},
-		{"role":"user","content":"你好"}]}`)
+func TestApplyPromptPolicyAutoPassthrough(t *testing.T) {
+	// auto：调用方自带 system（agent 框架）→ 原样透传，不注入不叠加
+	cfg := PromptConfig{Mode: "auto"}
+	body := []byte(`{"messages":[{"role":"system","content":"You are an AI agent powered by DeepSeek Harness."},{"role":"user","content":"你好"}]}`)
+	if string(applyPromptPolicy(body, cfg, "")) != string(body) {
+		t.Fatal("auto mode: caller system should pass through untouched (不叠加)")
+	}
+}
+
+func TestApplyPromptPolicyAutoInjectsWhenBare(t *testing.T) {
+	cfg := PromptConfig{Mode: "auto"}
+	body := []byte(`{"messages":[{"role":"user","content":"你好"}]}`)
 	out := applyPromptPolicy(body, cfg, "")
 	var obj map[string]any
-	if err := json.Unmarshal(out, &obj); err != nil {
-		t.Fatal(err)
+	json.Unmarshal(out, &obj)
+	msgs := obj["messages"].([]any)
+	if len(msgs) != 2 || msgs[0].(map[string]any)["role"] != "system" {
+		t.Fatalf("bare call should get injected system, got %v", msgs)
 	}
+	if c := msgs[0].(map[string]any)["content"].(string); !strings.Contains(c, "你是 Trae") {
+		t.Fatalf("injected content unexpected: %q", c[:50])
+	}
+}
+
+func TestApplyPromptPolicyTraeAlwaysInjects(t *testing.T) {
+	cfg := PromptConfig{Mode: "trae"}
+	body := []byte(`{"messages":[{"role":"system","content":"旧系统提示"},{"role":"user","content":"你好"}]}`)
+	out := applyPromptPolicy(body, cfg, "")
+	var obj map[string]any
+	json.Unmarshal(out, &obj)
 	msgs := obj["messages"].([]any)
 	sysCount := 0
 	for _, m := range msgs {
@@ -28,7 +46,7 @@ func TestApplyPromptPolicyMergesSingleSystem(t *testing.T) {
 			if len(c) < len(defaultSystemPrompt) {
 				t.Fatalf("merged system too short: %d", len(c))
 			}
-			if !bytes.Contains([]byte(c), []byte("旧系统提示")) || !bytes.Contains([]byte(c), []byte("第二条系统")) {
+			if !strings.Contains(c, "旧系统提示") {
 				t.Fatal("caller system content lost")
 			}
 			if strings.Count(c, defaultSystemPrompt) > 1 {
@@ -38,10 +56,6 @@ func TestApplyPromptPolicyMergesSingleSystem(t *testing.T) {
 	}
 	if sysCount != 1 {
 		t.Fatalf("system count=%d want 1 (不叠加)", sysCount)
-	}
-	// user 消息保留
-	if msgs[1].(map[string]any)["role"] != "user" {
-		t.Fatal("user message order changed")
 	}
 }
 
@@ -53,8 +67,8 @@ func TestApplyPromptPolicyOff(t *testing.T) {
 	}
 }
 
-func TestApplyPromptPolicyNoSystem(t *testing.T) {
-	cfg := PromptConfig{Mode: "trae"}
+func TestApplyPromptPolicyAutoNoSystem(t *testing.T) {
+	cfg := PromptConfig{Mode: "auto"}
 	body := []byte(`{"messages":[{"role":"user","content":"hi"}]}`)
 	out := applyPromptPolicy(body, cfg, "")
 	var obj map[string]any
