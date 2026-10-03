@@ -207,7 +207,7 @@ func Aggregate(r io.Reader, model string) (map[string]any, error) {
 		"id":      id,
 		"object":  "chat.completion",
 		"created": time.Now().Unix(),
-		"model":   "",
+		"model":   model,
 		"choices": []any{
 			map[string]any{
 				"index":         0,
