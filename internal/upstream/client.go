@@ -612,6 +612,79 @@ func ugMsg(message, msg string) string {
 	return msg
 }
 
+// Activity 单个商业活动条目（activity/info 返回）。
+type Activity struct {
+	ID        string `json:"id"`       // activity_id，如 checkin_credits / student_auth_reward
+	Type      int    `json:"type"`     // activity_type：102 新用户 /103 裂变 /104 签到 /105 发言奖励 /106 桌面下载 /107 学生认证
+	Grantable bool   `json:"grantable"`
+	Granted   bool   `json:"granted"`
+}
+
+// ActivityInfo 查询账号的商业活动列表（含可领取状态）。
+// 实测：活动领取完成后该活动从列表消失；grantable=true 表示可执行 action 领取。
+func (c *Client) ActivityInfo(a *auth.Auth) ([]Activity, error) {
+	req, err := http.NewRequest(http.MethodPost, c.ugBase()+"/trae/api/v2/ug/activity/info",
+		bytes.NewReader([]byte(`{"req_source":2}`)))
+	if err != nil {
+		return nil, err
+	}
+	UgHeaders(req, a)
+	data, err := c.doJSON(req, a)
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Data struct {
+			CommercialActivities []struct {
+				ActivityID   string `json:"activity_id"`
+				ActivityType int    `json:"activity_type"`
+				WorkExtra    struct {
+					Grantable bool `json:"grantable"`
+					Granted   bool `json:"granted"`
+				} `json:"work_extra"`
+			} `json:"commercial_activities"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, fmt.Errorf("activity info parse: %w", err)
+	}
+	out := make([]Activity, 0, len(resp.Data.CommercialActivities))
+	for _, act := range resp.Data.CommercialActivities {
+		out = append(out, Activity{
+			ID:        act.ActivityID,
+			Type:      act.ActivityType,
+			Grantable: act.WorkExtra.Grantable,
+			Granted:   act.WorkExtra.Granted,
+		})
+	}
+	return out, nil
+}
+
+// ClaimActivity 领取指定活动奖励（activity/action）。
+// 上游对已领取/不符合条件的活动返回 {}（幂等空响应，视为成功）。
+func (c *Client) ClaimActivity(a *auth.Auth, activityID string) error {
+	body, _ := json.Marshal(map[string]any{"activity_id": activityID, "req_source": 2})
+	req, err := http.NewRequest(http.MethodPost, c.ugBase()+"/trae/api/v2/ug/activity/action",
+		bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	UgHeaders(req, a)
+	data, err := c.doJSON(req, a)
+	if err != nil {
+		return err
+	}
+	var resp struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	}
+	_ = json.Unmarshal(data, &resp)
+	if resp.Code != 0 {
+		return fmt.Errorf("activity claim: code=%d %s", resp.Code, ugMsg(resp.Message, ""))
+	}
+	return nil
+}
+
 // UserEntUsage 聚合积分（ide_user_ent_usage 的 credits_limit 求和）。
 func (c *Client) UserEntUsage(a *auth.Auth) (remain int64, err error) {
 	remain, _, _, _, err = c.EntUsage(a)
