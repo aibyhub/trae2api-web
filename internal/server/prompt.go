@@ -55,7 +55,7 @@ const defaultSystemPrompt = `你是 Trae，一款 AI IDE 内置的智能编程�
 
 // PromptConfig 提示词策略配置。
 type PromptConfig struct {
-	Mode string // "auto"（默认）= 调用方有 system 则透传、无则注入；"trae" = 总是注入（调用方 system 合并）；"replace" = 统一替换（调用方 system 丢弃）；"off" = 总是透传
+	Mode string // "demote"（默认）= system 恒定一份固定提示词，调用方 system 降级为对话首条 user 消息；"auto" = 调用方有 system 则透传、无则注入；"trae" = 总是注入（调用方 system 合并）；"replace" = 统一替换（调用方 system 丢弃）；"off" = 总是透传
 	File string // 自定义提示词文件路径；空 = 内置默认
 }
 
@@ -83,6 +83,11 @@ func fixedPrompt(cfg PromptConfig, dataDir string) string {
 //	replace：统一替换——调用方 system 全部丢弃（不透传、不合并），恒定只发
 //	      一份固定的 Trae 风格提示词；行为交给对话内容决定，最小化 system 干扰。
 //	      与 workbuddy2api 的 custom 模式同语义。
+//	demote（默认）：system 恒定一份固定的 Trae 风格提示词（与 replace 相同，
+//	      不叠加、不透传）；调用方 system 内容降级为**对话开头的一条 user 消息**
+//	      （带包裹标记），供纯提示词驱动的 agent（run_code 工具桥等）保留协议——
+//	      工具暗号在对话里仍然可学，同时把 agent 指纹从风控重点盯防的 system 区
+//	      挪到宽松的对话区（11128 类逐字模板误杀的实证教训）。
 //	off ：总是透传。
 func applyPromptPolicy(body []byte, cfg PromptConfig, dataDir string) []byte {
 	mode := strings.ToLower(strings.TrimSpace(cfg.Mode))
@@ -122,8 +127,16 @@ func applyPromptPolicy(body []byte, cfg PromptConfig, dataDir string) []byte {
 	}
 	fixed := fixedPrompt(cfg, dataDir)
 	merged := fixed
-	// 仅 trae 模式合并调用方内容；replace/auto-裸调用 恒定只发固定提示词
-	// （调用方 system 已在上面被剥离丢弃）。
+	// demote：调用方 system 内容降级为对话开头的一条 user 消息（不占 system 角色）。
+	// 拼接顺序 = [system 固定] + [user 降级块] + 其余消息；纯提示词驱动的 agent
+	// （工具协议写在 system 里的，如 run_code 桥）靠这条消息保住工具调用能力。
+	if mode == "demote" && len(callerSys) > 0 {
+		demoted := "[调用方随请求附带的环境说明与工具协议——与当前任务相关的约定请遵循]\n\n" +
+			strings.Join(callerSys, "\n\n")
+		kept = append([]any{map[string]any{"role": "user", "content": demoted}}, kept...)
+	}
+	// 仅 trae 模式合并调用方内容；replace/demote/auto-裸调用 恒定只发固定提示词
+	// （调用方 system 已在上面被剥离）。
 	if mode == "trae" {
 		for _, s := range callerSys {
 			if s != fixed {

@@ -23,9 +23,12 @@ type Config struct {
 	DefaultModel  string `json:"default_model"` // "glm-5.2"
 
 	Prompt struct {
-		Mode string `json:"prompt_mode"` // "trae" = 注入固定提示词（默认）；"off" = 透传
+		Mode string `json:"prompt_mode"` // "demote" = system 恒定固定提示词 + 调用方 system 降级为对话首条 user（默认）；"replace"/"auto"/"trae"/"off"
 		File string `json:"prompt_file"` // 自定义提示词文件（相对 data/ 或绝对路径）
 	} `json:"prompt"`
+
+	// SanitizeFingerprints 出站请求体黑名单指纹清洗（默认 true；env TW2A_SANITIZE_FINGERPRINTS=false 关闭）。
+	SanitizeFingerprints bool `json:"sanitize_fingerprints"`
 
 	Cooldown struct {
 		PlanCredit  string `json:"plan_credit"`   // "12h"
@@ -77,7 +80,8 @@ func Default() *Config {
 	c.Schedule.CheckinHours = []int{9}
 	c.Schedule.RefreshHours = []int{3}
 	c.Schedule.BalanceRefreshMin = 30
-	c.Prompt.Mode = "auto"
+	c.Prompt.Mode = "demote"
+	c.SanitizeFingerprints = true
 	c.Upstream.TimeoutSeconds = 120
 	c.LogRetentionDays = 90
 	c.CheckinNotify = "fail"
@@ -177,6 +181,9 @@ func applyEnv(c *Config) {
 	}
 	if v := os.Getenv("TW2A_PROMPT_FILE"); v != "" {
 		c.Prompt.File = v
+	}
+	if v := os.Getenv("TW2A_SANITIZE_FINGERPRINTS"); v != "" {
+		c.SanitizeFingerprints = v != "false" && v != "0" && v != "off"
 	}
 	if v := os.Getenv("TW2A_LOG_RETENTION_DAYS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {

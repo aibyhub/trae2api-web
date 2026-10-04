@@ -60,4 +60,3 @@ func TestParseTokenUsage(t *testing.T) {
 		t.Fatal("nil map should be zeros")
 	}
 }
-

@@ -1,4 +1,4 @@
-﻿// callback.go TRAE 登录回调解析 + 登录 URL 构造。
+// callback.go TRAE 登录回调解析 + 登录 URL 构造。
 //
 // 移植自 login.sh 的内嵌 Python（parse_qs + 双层 JSON + unquote 容错），
 // 让 web 面板能在服务端完成「粘贴回调链接 → 换 token → 落盘」全流程，

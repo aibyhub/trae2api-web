@@ -46,9 +46,13 @@ type Config struct {
 	AdminPassword string
 	// LogRetentionDays 日志保留天数（usage.jsonl / checkin.jsonl）；0 = 关闭自动清理。
 	LogRetentionDays int
-	// Prompt 系统提示词策略：Mode "trae"（注入固定提示词，默认）/"off"（透传）；
+	// Prompt 系统提示词策略：Mode "demote"（默认，system 恒定固定提示词 + 调用方
+	// system 降级为对话首条 user 消息）/"replace"（调用方 system 丢弃）/"auto"
+	// （有 system 透传）/ "trae"（合并注入）/ "off"（透传）；
 	// File 自定义提示词文件（相对 data/ 或绝对路径），非空时覆盖内置提示词。
 	Prompt PromptConfig
+	// SanitizeFingerprints 出站请求体黑名单指纹清洗开关（默认 true）。
+	SanitizeFingerprints bool
 }
 
 // maxBodyBytes 请求体大小上限（8MB），超过返回 413。
@@ -446,6 +450,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 系统提示词策略：统一注入固定的 Trae 风格提示词（单一 system，不叠加），
 	// 让上游看到的请求前缀稳定 → 提示词缓存可跨请求命中 + 指纹一致。
 	body = applyPromptPolicy(body, h.cfg.Prompt, h.cfg.DataDir)
+	// 第二层：黑名单指纹清洗（demote 降级块/对话内容里的已知模板句），默认开启。
+	if h.cfg.SanitizeFingerprints {
+		body = SanitizeRequestBody(body)
+	}
 
 	// 使用日志：每笔请求一条（成功/失败都记），官方倍率 → 相对消耗
 	start := time.Now()
@@ -477,18 +485,18 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			respUsage = upstream.NormalizeUsage(respUsage)
 		}
 		h.details.Add(CallDetail{
-			TS:                 time.Now().UnixMilli(),
-			UID:                recUID,
-			Model:              configName,
-			UpstreamURL:        h.cfg.Upstream.AgentHost + upstream.EpChat,
-			RequestBody:        archiveBody(upstream.PrepareBody(body)),
-			SystemPrompt:       truncateStr(extractSystemPrompt(body), 32<<10),
-			ResponseContent:    truncateStr(recContent.String(), 256<<10),
-			ResponseReasoning:  truncateStr(recReasoning.String(), 256<<10),
-			Usage:              respUsage,
-			Status:             status,
-			Error:              errMsg,
-			DurationMs:         time.Since(start).Milliseconds(),
+			TS:                time.Now().UnixMilli(),
+			UID:               recUID,
+			Model:             configName,
+			UpstreamURL:       h.cfg.Upstream.AgentHost + upstream.EpChat,
+			RequestBody:       archiveBody(upstream.PrepareBody(body)),
+			SystemPrompt:      truncateStr(extractSystemPrompt(body), 32<<10),
+			ResponseContent:   truncateStr(recContent.String(), 256<<10),
+			ResponseReasoning: truncateStr(recReasoning.String(), 256<<10),
+			Usage:             respUsage,
+			Status:            status,
+			Error:             errMsg,
+			DurationMs:        time.Since(start).Milliseconds(),
 		})
 	}
 

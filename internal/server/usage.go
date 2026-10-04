@@ -30,8 +30,8 @@ type UsageEntry struct {
 	PromptTokens     int64   `json:"prompt_tokens,omitempty"`
 	CompletionTokens int64   `json:"completion_tokens,omitempty"`
 	TotalTokens      int64   `json:"total_tokens,omitempty"`
-	CacheRead        int64   `json:"cache_read,omitempty"`         // 提示词缓存命中 tokens
-	CacheCreation    int64   `json:"cache_creation,omitempty"`     // 缓存创建 tokens
+	CacheRead        int64   `json:"cache_read,omitempty"`     // 提示词缓存命中 tokens
+	CacheCreation    int64   `json:"cache_creation,omitempty"` // 缓存创建 tokens
 	Rate             float64 `json:"rate"`
 	Cost             float64 `json:"cost"` // total_tokens × rate（相对估算）
 	DurationMs       int64   `json:"duration_ms"`

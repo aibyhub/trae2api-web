@@ -22,9 +22,9 @@ type CallDetail struct {
 	UID               string         `json:"uid"`
 	Model             string         `json:"model"`
 	UpstreamURL       string         `json:"upstream_url"`
-	RequestBody       string         `json:"request_body"`        // 发给上游的最终 JSON（含系统提示词）
-	SystemPrompt      string         `json:"system_prompt"`       // 单独提取，方便查看
-	ResponseContent   string         `json:"response_content"`    // 模型正文
+	RequestBody       string         `json:"request_body"`     // 发给上游的最终 JSON（含系统提示词）
+	SystemPrompt      string         `json:"system_prompt"`    // 单独提取，方便查看
+	ResponseContent   string         `json:"response_content"` // 模型正文
 	ResponseReasoning string         `json:"response_reasoning,omitempty"`
 	Usage             map[string]any `json:"usage,omitempty"`
 	Status            string         `json:"status"`
@@ -34,9 +34,9 @@ type CallDetail struct {
 
 // DetailStore 明细存储（按天分文件）。
 type DetailStore struct {
-	mu       sync.Mutex
-	dir      string
-	retain   time.Duration
+	mu        sync.Mutex
+	dir       string
+	retain    time.Duration
 	lastPrune string // YYYY-MM-DD，一天只清一次
 }
 

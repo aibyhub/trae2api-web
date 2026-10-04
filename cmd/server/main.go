@@ -85,18 +85,19 @@ func main() {
 	})
 
 	h := server.NewHandler(server.Config{
-		Pool:         p,
-		Upstream:     up,
-		APIKey:       cfg.APIKey,
-		AuthDir:      cfg.AuthDir,
-		DataDir:      filepath.Dir(cfg.StateFile),
-		Prompt:       server.PromptConfig{Mode: cfg.Prompt.Mode, File: cfg.Prompt.File},
-		PlanCooldown: cfg.PlanCreditDur,
-		SoftCooldown: cfg.SoftRateDur,
-		ErrThreshold: cfg.Cooldown.ErrThresh,
-		ErrCooldown:  cfg.ErrCooldownDur,
-		DefaultModel: cfg.DefaultModel,
-		Sched:        sch, // /admin 手动签到/刷新按钮的执行体
+		Pool:                 p,
+		Upstream:             up,
+		APIKey:               cfg.APIKey,
+		AuthDir:              cfg.AuthDir,
+		DataDir:              filepath.Dir(cfg.StateFile),
+		Prompt:               server.PromptConfig{Mode: cfg.Prompt.Mode, File: cfg.Prompt.File},
+		SanitizeFingerprints: cfg.SanitizeFingerprints,
+		PlanCooldown:         cfg.PlanCreditDur,
+		SoftCooldown:         cfg.SoftRateDur,
+		ErrThreshold:         cfg.Cooldown.ErrThresh,
+		ErrCooldown:          cfg.ErrCooldownDur,
+		DefaultModel:         cfg.DefaultModel,
+		Sched:                sch, // /admin 手动签到/刷新按钮的执行体
 
 		CallbackBase: cfg.CallbackBase, // 空 = 回调仍用 127.0.0.1:<port>
 

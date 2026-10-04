@@ -1,4 +1,4 @@
-﻿// 管理面板（/admin）：只读查询，无鉴权（本地面板）；CLI 操作留待开发。
+// 管理面板（/admin）：只读查询，无鉴权（本地面板）；CLI 操作留待开发。
 package server
 
 import (
@@ -24,19 +24,19 @@ func (h *Handler) adminPage(w http.ResponseWriter, r *http.Request) {
 // adminCredits 查询全部账号的实时额度 + 签到状态 + 权益包明细（并发拉取上游）。
 func (h *Handler) adminCredits(w http.ResponseWriter, r *http.Request) {
 	type acct struct {
-		UID            string           `json:"uid"`
-		Nickname       string           `json:"nickname"`
-		Remain         int64            `json:"remain"`
-		Limit          int64            `json:"limit"`
-		Used           int64            `json:"used"`
-		Packs          int              `json:"packs"`
+		UID            string             `json:"uid"`
+		Nickname       string             `json:"nickname"`
+		Remain         int64              `json:"remain"`
+		Limit          int64              `json:"limit"`
+		Used           int64              `json:"used"`
+		Packs          int                `json:"packs"`
 		PacksDetail    []upstream.EntPack `json:"packs_detail,omitempty"`
-		CheckedIn      bool             `json:"checked_in"`
-		CheckinCredits int64            `json:"checkin_credits"`
-		CheckinEnable  bool             `json:"checkin_enable"`
-		Cooling        bool             `json:"cooling"`
-		Disabled       bool             `json:"disabled"`
-		Error          string           `json:"error,omitempty"`
+		CheckedIn      bool               `json:"checked_in"`
+		CheckinCredits int64              `json:"checkin_credits"`
+		CheckinEnable  bool               `json:"checkin_enable"`
+		Cooling        bool               `json:"cooling"`
+		Disabled       bool               `json:"disabled"`
+		Error          string             `json:"error,omitempty"`
 	}
 
 	st := h.cfg.Pool.List()
