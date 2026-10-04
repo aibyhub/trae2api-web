@@ -55,7 +55,7 @@ const defaultSystemPrompt = `你是 Trae，一款 AI IDE 内置的智能编程�
 
 // PromptConfig 提示词策略配置。
 type PromptConfig struct {
-	Mode string // "auto"（默认）= 调用方有 system 则透传、无则注入；"trae" = 总是注入；"off" = 总是透传
+	Mode string // "auto"（默认）= 调用方有 system 则透传、无则注入；"trae" = 总是注入（调用方 system 合并）；"replace" = 统一替换（调用方 system 丢弃）；"off" = 总是透传
 	File string // 自定义提示词文件路径；空 = 内置默认
 }
 
@@ -80,6 +80,9 @@ func fixedPrompt(cfg PromptConfig, dataDir string) string {
 //	      提示词会导致行为混乱且成倍浪费 token）。裸调用（无 system）→ 注入
 //	      固定的 Trae 风格提示词补足身份与行为基线。
 //	trae：总是注入（调用方 system 合并为「用户附加指令」段）——指纹最大化。
+//	replace：统一替换——调用方 system 全部丢弃（不透传、不合并），恒定只发
+//	      一份固定的 Trae 风格提示词；行为交给对话内容决定，最小化 system 干扰。
+//	      与 workbuddy2api 的 custom 模式同语义。
 //	off ：总是透传。
 func applyPromptPolicy(body []byte, cfg PromptConfig, dataDir string) []byte {
 	mode := strings.ToLower(strings.TrimSpace(cfg.Mode))
@@ -119,6 +122,8 @@ func applyPromptPolicy(body []byte, cfg PromptConfig, dataDir string) []byte {
 	}
 	fixed := fixedPrompt(cfg, dataDir)
 	merged := fixed
+	// 仅 trae 模式合并调用方内容；replace/auto-裸调用 恒定只发固定提示词
+	// （调用方 system 已在上面被剥离丢弃）。
 	if mode == "trae" {
 		for _, s := range callerSys {
 			if s != fixed {

@@ -88,3 +88,38 @@ func TestFixedPromptFileOverride(t *testing.T) {
 		t.Fatalf("file override not applied: %q", got)
 	}
 }
+
+// TestApplyPromptPolicyReplaceMode replace 模式：调用方 system 一律丢弃，
+// 恒定只发一份固定的 Trae 风格提示词（与 workbuddy2api custom 同语义）。
+func TestApplyPromptPolicyReplaceMode(t *testing.T) {
+	body := []byte(`{"model":"m","messages":[
+		{"role":"system","content":"You are an AI agent powered by DeepSeek Harness. 超长框架提示词"},
+		{"role":"system","content":"第二条 system"},
+		{"role":"user","content":"帮我写个脚本"}]}`)
+	out := applyPromptPolicy(body, PromptConfig{Mode: "replace"}, t.TempDir())
+	var obj struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content any    `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(out, &obj); err != nil {
+		t.Fatal(err)
+	}
+	if len(obj.Messages) != 2 {
+		t.Fatalf("want 2 messages (1 system + 1 user), got %d", len(obj.Messages))
+	}
+	if obj.Messages[0].Role != "system" {
+		t.Fatalf("first message role=%s", obj.Messages[0].Role)
+	}
+	sys, _ := obj.Messages[0].Content.(string)
+	if sys != defaultSystemPrompt {
+		t.Fatalf("system must be exactly the fixed Trae prompt (len %d), got len %d", len(defaultSystemPrompt), len(sys))
+	}
+	if strings.Contains(string(out), "DeepSeek Harness") || strings.Contains(string(out), "第二条 system") {
+		t.Fatal("caller system content must be dropped entirely in replace mode")
+	}
+	if obj.Messages[1].Role != "user" {
+		t.Fatalf("user message must be preserved, role=%s", obj.Messages[1].Role)
+	}
+}
