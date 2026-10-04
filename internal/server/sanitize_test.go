@@ -56,3 +56,15 @@ func TestSanitizeRequestBodyCoversToolCallArguments(t *testing.T) {
 		t.Fatalf("tool call arguments must be sanitized: %s", out)
 	}
 }
+
+func TestOpenAIErrorTypeMappingTrae(t *testing.T) {
+	if got := openAIErrorType(401); got != "invalid_request_error" {
+		t.Errorf("401 type=%q", got)
+	}
+	if got := openAIErrorType(429); got != "rate_limit_error" {
+		t.Errorf("429 type=%q", got)
+	}
+	if got := openAIErrorType(503); got != "api_error" {
+		t.Errorf("503 type=%q", got)
+	}
+}

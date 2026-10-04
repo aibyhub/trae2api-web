@@ -663,11 +663,26 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_, _ = w.Write(raw)
 }
 
+// openAIErrorType 按状态码映射 OpenAI 错误 type（规范枚举）：
+// 400/401/404 类请求问题 → invalid_request_error；429 → rate_limit_error；
+// 5xx/其余 → api_error。恒为 api_error 会让按 error.type 分流的 SDK 误判类别。
+func openAIErrorType(status int) string {
+	switch status {
+	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusNotFound,
+		http.StatusRequestEntityTooLarge, http.StatusUnprocessableEntity:
+		return "invalid_request_error"
+	case http.StatusTooManyRequests:
+		return "rate_limit_error"
+	default:
+		return "api_error"
+	}
+}
+
 func writeOpenAIError(w http.ResponseWriter, status int, code, msg string) {
 	writeJSON(w, status, map[string]any{
 		"error": map[string]any{
 			"message": msg,
-			"type":    "api_error",
+			"type":    openAIErrorType(status),
 			"code":    code,
 		},
 	})
