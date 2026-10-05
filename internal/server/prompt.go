@@ -55,7 +55,7 @@ const defaultSystemPrompt = `你是 Trae，一款 AI IDE 内置的智能编程�
 
 // PromptConfig 提示词策略配置。
 type PromptConfig struct {
-	Mode string // "demote"（默认）= system 恒定一份固定提示词，调用方 system 降级为对话首条 user 消息；"auto" = 调用方有 system 则透传、无则注入；"trae" = 总是注入（调用方 system 合并）；"replace" = 统一替换（调用方 system 丢弃）；"off" = 总是透传
+	Mode string // "auto"（默认）= 调用方有 system 则透传、无则注入；"demote" = system 恒定固定提示词、调用方 system 降级为对话首条 user 消息；"trae" = 总是注入（调用方 system 合并）；"replace" = 统一替换（调用方 system 丢弃）；"off" = 总是透传
 	File string // 自定义提示词文件路径；空 = 内置默认
 }
 

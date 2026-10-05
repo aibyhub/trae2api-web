@@ -80,7 +80,11 @@ func Default() *Config {
 	c.Schedule.CheckinHours = []int{9}
 	c.Schedule.RefreshHours = []int{3}
 	c.Schedule.BalanceRefreshMin = 30
-	c.Prompt.Mode = "demote"
+	// 默认 auto：agent 框架（DeepSeek Harness 等）的提示词与其模型联合训练，
+	// 必须留在 system 角色原样透传——2026-10-05 生产实测：demote（降级到 user
+	// 消息 + Trae 人设 system）会导致长 agent 会话思考退化成重复循环。
+	// demote/replace 保留为可选模式（简单工具类调用方可用）。
+	c.Prompt.Mode = "auto"
 	c.SanitizeFingerprints = true
 	c.Upstream.TimeoutSeconds = 120
 	c.LogRetentionDays = 90
