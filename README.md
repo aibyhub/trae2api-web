@@ -121,6 +121,16 @@ go build -o trae2api-web ./cmd/server
 - 代理地址 scheme 的校验规则与传输层完全一致（`upstream.ValidProxyScheme`），不会出现「保存成功但实际静默直连」。
 - 全局兜底：环境变量 `TW2A_PROXY_URL`（账号未配 `proxyUrl` 时生效，优先级低于账号自身配置）。
 
+### TLS 指纹复刻（v1.3.8 起，默认开启）
+
+出站 ClientHello 复刻真实 Trae 客户端（ahaNet 栈）形态：TLS 1.2 封顶、18 cipher、7 扩展、无 ALPN，
+消除 Go 默认栈在 JA3/JA4 层的可识别性（参数为 2026-10-02 真机透明中继字节级抓包，见
+`internal/tlsfp`）。直连与 SOCKS5/HTTP 代理出口均生效（代理隧道内做指纹握手，出口 IP 与指纹一致呈现）。
+
+- 回退开关：环境变量 `TW2A_TLS_FINGERPRINT=off` + 重启，即恢复历史传输行为（直连自动 h2 / 代理强制 h1.1）。
+- 也可以回退镜像版本（上一 tag 的镜像保留在 GHCR）。
+- https 代理出口不做指纹（TLS-to-proxy 双层握手），自动回退标准传输并打日志。
+
 ## 面板登录（可选，替代 Nginx Basic Auth）
 
 在 1Panel 的环境变量里加一条即可（只在 env 读，不落盘、不进日志）：

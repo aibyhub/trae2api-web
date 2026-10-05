@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"trae2api-web/internal/auth"
+	"trae2api-web/internal/tlsfp"
 )
 
 // ErrKind 错误分类，pool 据此决定冷却时长（SPEC §4.3）。
@@ -118,14 +119,75 @@ type Client struct {
 // proxyPair 一个代理出口对应的客户端对；std 有总超时（短请求），stream 无（SSE）。
 type proxyPair struct{ std, stream *http.Client }
 
-// New 生产默认值。配置连接池减少 TLS 握手。
-func New() *Client {
+// tlsFPEnv TW2A_TLS_FINGERPRINT：出站 TLS 指纹复刻开关（复刻真实 Trae 客户端
+// ahanet 形态，消除 Go 栈 JA3 可识别性）。默认开启；0/false/off/no 关闭。
+// 关闭即回退历史传输行为（直连自动 h2 / 代理强制 h1.1），是主回退手段。
+// 环境变量进程内不变，读一次缓存（与 proxyEnv 同风格）。
+var (
+	tlsFPOnce sync.Once
+	tlsFPVal  bool
+)
+
+func tlsFPEnabled() bool {
+	tlsFPOnce.Do(func() {
+		v := strings.ToLower(strings.TrimSpace(os.Getenv("TW2A_TLS_FINGERPRINT")))
+		tlsFPVal = !(v == "0" || v == "false" || v == "off" || v == "no")
+	})
+	return tlsFPVal
+}
+
+// newUpstreamTransport 构造上游 Transport（直连或按代理出口），按 tlsfp 开关分流。
+// tlsfp 开启时 Proxy 必须置 nil——标准库只对非代理 https 调 DialTLSContext，代理
+// 隧道由 tlsfp 拨号器内部建立，指纹握手发生在隧道出口端；UConn 非 *tls.Conn，
+// TLSNextProto 仍置空以显式约定 HTTP/1.1。
+// 关闭（回退模式）：直连保持历史行为（自动 h2）；代理保持 v1.2.8 强制 h1.1。
+func newUpstreamTransport(proxyURL *url.URL) *http.Transport {
 	tr := &http.Transport{
 		MaxIdleConns:          100,
 		MaxIdleConnsPerHost:   20,
 		IdleConnTimeout:       90 * time.Second,
 		ResponseHeaderTimeout: 120 * time.Second, // 首字节兜底（长推理预留），不限制整流时长
 	}
+	if tlsFPEnabled() {
+		dial, err := tlsfp.NewDialTLSContext(nil, proxyURL)
+		if err == nil {
+			tr.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
+			tr.DialTLSContext = dial
+			return tr
+		}
+		// 仅 https 代理会走到这里（不做 TLS-to-proxy 指纹，与 sub2api 同策略）：
+		// 回退标准代理路径，日志留证。
+		log.Printf("tlsfp: proxy %q unsupported (%v) — fallback to standard transport (no fingerprint)", proxyURL, err)
+	}
+	if proxyURL != nil {
+		tr.Proxy = http.ProxyURL(proxyURL)
+		// v1.2.8 修复：走代理的出口一律只谈 HTTP/1.1（关掉自动 HTTP/2 + 清掉 ALPN 里的 h2）。
+		//
+		// 起因：base.Clone() 会在原 transport 上先跑完 HTTP/2 自动配置，把带 "h2" 的
+		// TLSClientConfig（ALPN）复制给克隆体，却因 tlsNextProtoWasNil 不复制
+		// TLSNextProto；而克隆体的 onceSetNextProtoDefaults 见 TLSClientConfig 非空
+		// （ForceAttemptHTTP2=false）就提前 return —— 于是这个 transport「ALPN 宣告 h2、
+		// 却没有 h2 实现」，上游回的 HTTP/2 SETTINGS 帧被按 HTTP/1.1 解析：
+		//   net/http: HTTP/1.x transport connection broken: malformed HTTP response "\x00\x00\x12\x04..."
+		//
+		// 实测（2026-10-01 线上 SOCKS5 出口 10.0.0.1/2/3）：直连走 h2 正常，但经代理
+		// 协商 h2 的链路不稳定（curl 带 h2 ALPN 时握手直接被重置）；强制 HTTP/1.1 后
+		// 额度/签到接口立即恢复（约 1.2s 返回）。直连路径不受影响，仍用 h2。
+		// 注意：TLSNextProto 必须非 nil（Go 用它关闭自动 HTTP/2），且必须同时把 ALPN
+		// 里的 h2 去掉——否则服务器照样协商 h2，结果与旧 bug 相同。
+		tr.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
+		if tr.TLSClientConfig != nil {
+			tc := tr.TLSClientConfig.Clone()
+			tc.NextProtos = []string{"http/1.1"}
+			tr.TLSClientConfig = tc
+		}
+	}
+	return tr
+}
+
+// New 生产默认值。配置连接池减少 TLS 握手。
+func New() *Client {
+	tr := newUpstreamTransport(nil)
 	return &Client{
 		HTTP:       &http.Client{Timeout: 120 * time.Second, Transport: tr},
 		StreamHTTP: &http.Client{Transport: tr}, // 无总超时
@@ -184,33 +246,9 @@ func (c *Client) clientFor(a *auth.Auth) (std, stream *http.Client) {
 		c.proxyClients.Store(proxy, p)
 		return p.std, p.stream
 	}
-	var tr *http.Transport
-	if base, ok := c.HTTP.Transport.(*http.Transport); ok && base != nil {
-		tr = base.Clone() // 复制连接池/超时兜底设置（Clone 不复制连接），再覆盖代理
-	} else {
-		tr = &http.Transport{}
-	}
-	tr.Proxy = http.ProxyURL(u)
-	// v1.2.8 修复：走代理的出口一律只谈 HTTP/1.1（关掉自动 HTTP/2 + 清掉 ALPN 里的 h2）。
-	//
-	// 起因：base.Clone() 会在原 transport 上先跑完 HTTP/2 自动配置，把带 "h2" 的
-	// TLSClientConfig（ALPN）复制给克隆体，却因 tlsNextProtoWasNil 不复制
-	// TLSNextProto；而克隆体的 onceSetNextProtoDefaults 见 TLSClientConfig 非空
-	// （ForceAttemptHTTP2=false）就提前 return —— 于是这个 transport「ALPN 宣告 h2、
-	// 却没有 h2 实现」，上游回的 HTTP/2 SETTINGS 帧被按 HTTP/1.1 解析：
-	//   net/http: HTTP/1.x transport connection broken: malformed HTTP response "\x00\x00\x12\x04..."
-	//
-	// 实测（2026-10-01 线上 SOCKS5 出口 10.0.0.1/2/3）：直连走 h2 正常，但经代理
-	// 协商 h2 的链路不稳定（curl 带 h2 ALPN 时握手直接被重置）；强制 HTTP/1.1 后
-	// 额度/签到接口立即恢复（约 1.2s 返回）。直连路径不受影响，仍用 h2。
-	// 注意：TLSNextProto 必须非 nil（Go 用它关闭自动 HTTP/2），且必须同时把 ALPN
-	// 里的 h2 去掉——否则服务器照样协商 h2，结果与旧 bug 相同。
-	tr.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
-	if tr.TLSClientConfig != nil {
-		tc := tr.TLSClientConfig.Clone()
-		tc.NextProtos = []string{"http/1.1"}
-		tr.TLSClientConfig = tc
-	}
+	// 统一走 newUpstreamTransport：tlsfp 开启时由指纹拨号器建隧道（Proxy 置 nil），
+	// 关闭时等价于旧 Clone+Proxy 路径（v1.2.8 强制 h1.1）。
+	tr := newUpstreamTransport(u)
 	p := &proxyPair{
 		std:    &http.Client{Timeout: c.HTTP.Timeout, Transport: tr},
 		stream: &http.Client{Transport: tr}, // 无总超时（SSE）
