@@ -546,6 +546,9 @@ func errStats(entries []UsageEntry) []usageErrStat {
 		if e.TS > s.LastTS {
 			s.LastTS = e.TS
 			s.Sample = e.Error
+			if len(s.Sample) > 1024 { // 超长上游回执截断（前端弹窗够用，payload 不被撑爆）
+				s.Sample = s.Sample[:1024]
+			}
 		}
 	}
 	out := make([]usageErrStat, 0, len(acc))

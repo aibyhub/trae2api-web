@@ -122,7 +122,8 @@ func TestUsagePanelFields(t *testing.T) {
 	now := time.Now()
 	devErr := "code=4027 tool call failed: 400:developer is not one of ['system', 'assistant', 'user', 'tool', 'function'] - 'messages.['0].role'"
 	h.usage.Add(UsageEntry{TS: now.Add(-10 * time.Minute).UnixMilli(), UID: "a", Model: "glm-5.3-flashx",
-		Status: "error", Error: devErr, DurationMs: 45_000, CompletionTokens: 380})
+		Status: "error", Error: devErr + "----" + strings.Repeat("x", 1100),
+		DurationMs: 45_000, CompletionTokens: 380})
 	// 上一等长窗口（24-48h 前）一条 429：仅计入 prev_totals，不进当前 errs
 	h.usage.Add(UsageEntry{TS: now.Add(-36 * time.Hour).UnixMilli(), UID: "b", Model: "glm-5.2",
 		Status: "error", Error: "软冷却：429 rate limit", DurationMs: 90_000})
@@ -141,6 +142,10 @@ func TestUsagePanelFields(t *testing.T) {
 	json.Unmarshal(errsRaw, &errs)
 	if len(errs) != 1 || errs[0].Kind != "call_failed" || errs[0].N != 1 || !strings.Contains(errs[0].Sample, "developer") {
 		t.Fatalf("errs=%s", errsRaw)
+	}
+	// 样例截断：>1024 字符的长回执不整段下发
+	if len(errs[0].Sample) > 1024 {
+		t.Fatalf("sample len=%d 未截断", len(errs[0].Sample))
 	}
 
 	prevRaw, _ := json.Marshal(d["prev_totals"])
