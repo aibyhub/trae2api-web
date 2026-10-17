@@ -28,6 +28,25 @@ func TestPrepareBodyForcesStreamAndFunction(t *testing.T) {
 	}
 }
 
+// 角色归一化：developer（OpenAI 新式 system 别名，Codex/o 系客户端）→ system，
+// 避免透传后上游白名单整单 400（code=4027 "developer is not one of ..."）。
+func TestPrepareBodyNormalizesDeveloperRole(t *testing.T) {
+	out := PrepareBody([]byte(`{"model":"glm-5.3-flashx","messages":[{"role":"developer","content":"You are a helpful agent."},{"role":"user","content":"hi"}]}`))
+	var m map[string]any
+	json.Unmarshal(out, &m)
+	msgs := m["messages"].([]any)
+	if msgs[0].(map[string]any)["role"] != "system" {
+		t.Fatalf("role=%v", msgs[0].(map[string]any)["role"])
+	}
+	// 全链路：developer 出现在任何位置都要归一，不只是首条
+	out = PrepareBody([]byte(`{"messages":[{"role":"user","content":"x"},{"role":"developer","content":"mid"}]}`))
+	json.Unmarshal(out, &m)
+	msgs = m["messages"].([]any)
+	if msgs[1].(map[string]any)["role"] != "system" {
+		t.Fatalf("mid role=%v", msgs[1].(map[string]any)["role"])
+	}
+}
+
 func TestPrepareBodyKeepsArrayContent(t *testing.T) {
 	out := PrepareBody([]byte(`{"model":"glm-5.2","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`))
 	var m map[string]any

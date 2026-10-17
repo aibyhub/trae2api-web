@@ -1,7 +1,7 @@
 // chatstream_terminal_test.go 流式守护行为锁：
-// 1) stream 请求一律先落 SSE 头 + 首个 ": ping" 心跳注释（防上游慢首字节期间客户端悬挂）；
-// 2) 全部账号不可用（或轮换预算耗尽）时终态＝流内 event:error + OpenAI 错误对象 + [DONE]，
-//    不再发 503 JSON（头已提交）。
+//  1. stream 请求一律先落 SSE 头 + 首个 ": ping" 心跳注释（防上游慢首字节期间客户端悬挂）；
+//  2. 全部账号不可用（或轮换预算耗尽）时终态＝流内 event:error + OpenAI 错误对象 + [DONE]，
+//     不再发 503 JSON（头已提交）。
 package server
 
 import (

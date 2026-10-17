@@ -54,12 +54,25 @@ type Status struct {
 
 	// TransportDown = 该账号出口（代理/网络）处于临时隔离窗口（见 NoteTransportError）。
 	// 与账号健康无关：仅表示"现在别用这个出口"，不累计 errCount、不写 state.json。
-	TransportDown     bool      `json:"transport_down,omitempty"`
-	TransportReason   string    `json:"transport_reason,omitempty"`
-	TransportUntil    time.Time `json:"transport_until,omitempty"`
-	LastCheckinAt     int64     `json:"last_checkin_at,omitempty"`     // 最近一次签到结果时间（unix 秒）
-	LastCheckinStatus string    `json:"last_checkin_status,omitempty"` // claimed/already/checkin_off/error...
+	TransportDown     bool       `json:"transport_down,omitempty"`
+	TransportReason   string     `json:"transport_reason,omitempty"`
+	TransportUntil    time.Time  `json:"transport_until,omitempty"`
+	LastCheckinAt     int64      `json:"last_checkin_at,omitempty"`     // 最近一次签到结果时间（unix 秒）
+	LastCheckinStatus string     `json:"last_checkin_status,omitempty"` // claimed/already/checkin_off/error...
+	Packs             []PackInfo `json:"packs,omitempty"`               // 最近一次刷到的积分包快照（到期日历用）
 }
+
+// PackInfo 单个积分包快照（scheduler 的 EntUsageDetail 回填；不含空包）。
+type PackInfo struct {
+	Group    string `json:"group"`          // 分组，如「每日签到」
+	Name     string `json:"name,omitempty"` // display_desc
+	Limit    int64  `json:"limit"`
+	Used     int64  `json:"used"`
+	ExpireAt int64  `json:"expire_at,omitempty"` // unix 秒；0 = 未知
+}
+
+// Remain 该包剩余积分（limit-used）。
+func (p PackInfo) Remain() int64 { return p.Limit - p.Used }
 
 type entry struct {
 	a        *auth.Auth
@@ -73,8 +86,9 @@ type entry struct {
 	// 出口/网络临时隔离（内存态，不落盘）：代理不可达、连接被重置等导致的一次失败。
 	transportUntil  time.Time
 	transportReason string
-	lastCheckinAt   int64  // 最近签到时间（unix 秒）
-	lastCheckin     string // 最近签到结果
+	lastCheckinAt   int64       // 最近签到时间（unix 秒）
+	lastCheckin     string      // 最近签到结果
+	packs           []PackInfo  // 最近一次 EntUsageDetail 快照（内存 + 落盘）
 	pickStamps      []time.Time // 近 1h 成功调用节拍（内存态）：同过期日积分对比时按此降权
 }
 
@@ -102,14 +116,15 @@ func (e *entry) healthy(now time.Time) bool {
 
 // stateEntry state.json 单账号持久化条目。
 type stateEntry struct {
-	Credits           int64     `json:"credits"`
-	Disabled          bool      `json:"disabled"`
-	Enabled           *bool     `json:"enabled,omitempty"` // 指针：旧文件缺省时按 true 处理，不写回脏值
-	Reason            string    `json:"reason,omitempty"`
-	Until             time.Time `json:"until,omitempty"`
-	ExpireAt          int64     `json:"expire_at,omitempty"` // 最近过期包（unix 秒）
-	LastCheckinAt     int64     `json:"last_checkin_at,omitempty"`
-	LastCheckinStatus string    `json:"last_checkin_status,omitempty"`
+	Credits           int64      `json:"credits"`
+	Disabled          bool       `json:"disabled"`
+	Enabled           *bool      `json:"enabled,omitempty"` // 指针：旧文件缺省时按 true 处理，不写回脏值
+	Reason            string     `json:"reason,omitempty"`
+	Until             time.Time  `json:"until,omitempty"`
+	ExpireAt          int64      `json:"expire_at,omitempty"` // 最近过期包（unix 秒）
+	LastCheckinAt     int64      `json:"last_checkin_at,omitempty"`
+	LastCheckinStatus string     `json:"last_checkin_status,omitempty"`
+	Packs             []PackInfo `json:"packs,omitempty"` // 积分包快照（到期日历）
 }
 
 // stateFile 持久化格式。
@@ -119,9 +134,9 @@ type stateFile struct {
 
 // Pool 账号池。
 type Pool struct {
-	mu      sync.RWMutex
-	byUID   map[string]*entry
-	stateFp string
+	mu       sync.RWMutex
+	byUID    map[string]*entry
+	stateFp  string
 	creditFp string // credits.jsonl（积分余额轨迹）；空 = 不记录
 }
 
@@ -294,6 +309,46 @@ func (p *Pool) SetExpiry(uid string, expireAt int64) {
 	if e, ok := p.byUID[uid]; ok {
 		e.expireAt = expireAt
 	}
+}
+
+// SetPacks 覆盖账号的积分包快照（scheduler EntUsageDetail 成功后调用）。
+// 同时从快照重算最早到期时刻；已过包保留 48h（面板"已过期 N 天"展示），其后丢弃。
+func (p *Pool) SetPacks(uid string, packs []PackInfo) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return
+	}
+	now := time.Now().Unix()
+	kept := packs[:0:0]
+	soonest := int64(0)
+	for _, pk := range packs {
+		if pk.Limit <= 0 {
+			continue
+		}
+		if pk.ExpireAt > 0 && pk.ExpireAt < now-48*3600 {
+			continue // 过期超过 48h 的旧包快照
+		}
+		kept = append(kept, pk)
+		if pk.Remain() > 0 && pk.ExpireAt > 0 && (soonest == 0 || pk.ExpireAt < soonest) {
+			soonest = pk.ExpireAt
+		}
+	}
+	e.packs = kept
+	if soonest > 0 || len(packs) == 0 {
+		e.expireAt = soonest
+	}
+}
+
+// PacksOf 账号的积分包快照（面板到期日历）；无快照返回 nil。
+func (p *Pool) PacksOf(uid string) []PackInfo {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if e, ok := p.byUID[uid]; ok {
+		return e.packs
+	}
+	return nil
 }
 
 // SetCredits 更新账号积分（有变化时记一条 credits.jsonl 轨迹）。
@@ -470,6 +525,7 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		TransportUntil:    e.transportUntil,
 		LastCheckinAt:     e.lastCheckinAt,
 		LastCheckinStatus: e.lastCheckin,
+		Packs:             e.packs,
 	}
 }
 
@@ -499,6 +555,7 @@ func (p *Pool) load() {
 			reason:   s.Reason,
 			until:    s.Until,
 			expireAt: s.ExpireAt,
+			packs:    s.Packs,
 
 			lastCheckinAt: s.LastCheckinAt,
 			lastCheckin:   s.LastCheckinStatus,
@@ -512,12 +569,22 @@ func (p *Pool) saveLocked() {
 	}
 	sf := stateFile{Accounts: map[string]stateEntry{}}
 	for uid, e := range p.byUID {
+		now := time.Now().Unix()
+		kept := e.packs[:0:0]
+		for _, pk := range e.packs {
+			if pk.ExpireAt > 0 && pk.ExpireAt < now-48*3600 {
+				continue
+			}
+			kept = append(kept, pk)
+		}
+		e.packs = kept
 		se := stateEntry{
 			Credits:  e.credits,
 			Disabled: e.disabled,
 			Reason:   e.reason,
 			Until:    e.until,
 			ExpireAt: e.expireAt,
+			Packs:    kept,
 
 			LastCheckinAt:     e.lastCheckinAt,
 			LastCheckinStatus: e.lastCheckin,

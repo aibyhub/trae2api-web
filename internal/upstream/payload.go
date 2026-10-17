@@ -37,6 +37,17 @@ func PrepareBody(src []byte) []byte {
 			}
 			content, present := m["content"]
 			role, _ := m["role"].(string)
+			// Role 归一化：上游白名单仅 system/assistant/user/tool/function。
+			// OpenAI 新式角色 developer（语义=system，o 系/Codex 等客户端发）
+			// 透传会整单 400（code=4027 "developer is not one of ..."）。
+			switch role {
+			case "developer":
+				m["role"] = "system"
+				role = "system"
+			case "role": // 防御：极老式 ChatML 残留
+				m["role"] = "user"
+				role = "user"
+			}
 
 			// assistant 消息回传 tool_calls: OpenAI function → 上游 function_call
 			if role == "assistant" {

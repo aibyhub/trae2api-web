@@ -103,7 +103,7 @@ func (h *Handler) adminLogsPrune(w http.ResponseWriter, r *http.Request) {
 	if req.Clear {
 		days = 0
 	}
- 	ru, rc, errMsg := h.PruneLogs(days)
+	ru, rc, errMsg := h.PruneLogs(days)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": errMsg == "", "removed_usage": ru, "removed_checkin": rc, "error": errMsg,
 		"files": h.logFiles(), "last_prune": h.logs.snapshot(),

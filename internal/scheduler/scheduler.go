@@ -308,11 +308,11 @@ func (s *Scheduler) checkinUID(uid string, manual bool) Result {
 		}
 	}
 	// 查积分 + 解冻（无论签到结果，冷却账号按最新积分判断解冻），
-	// 同时把「最近过期包」写回池，供选号「积分先过期优先」使用。
+	// 同时把「积分包快照 + 最近过期包」写回池，供选号「积分先过期优先」与面板到期日历使用。
 	if packs, remain, _, _, err := s.cfg.Upstream.EntUsageDetail(a); err != nil {
 		log.Printf("ent-usage %s: %v", uid, err)
 	} else {
-		s.cfg.Pool.SetExpiry(uid, upstream.SoonestExpiry(packs))
+		s.cfg.Pool.SetPacks(uid, packsFromEnt(packs))
 		s.cfg.Pool.ReenableIfCredits(uid, remain)
 	}
 	s.cfg.Pool.SetCheckin(uid, res.Status)
@@ -325,6 +325,18 @@ func (s *Scheduler) checkinUID(uid string, manual bool) Result {
 
 // RecentCheckins 最近 n 条签到记录（最新在前），供面板「自动签到」看板。
 func (s *Scheduler) RecentCheckins(n int) []CheckinLogEntry { return s.log.Recent(n) }
+
+// packsFromEnt upstream.EntPack → pool.PackInfo（快照只留展示所需字段）。
+func packsFromEnt(ps []upstream.EntPack) []pool.PackInfo {
+	out := make([]pool.PackInfo, 0, len(ps))
+	for _, p := range ps {
+		out = append(out, pool.PackInfo{
+			Group: p.Group, Name: p.Name,
+			Limit: p.Limit, Used: p.Used, ExpireAt: p.ExpireAt,
+		})
+	}
+	return out
+}
 
 // PruneCheckins 按保留期裁剪签到日志（keepDays：<0 不动作 / 0 清空 / >0 保留最近 N 天）。
 func (s *Scheduler) PruneCheckins(keepDays int) (removed, kept int, err error) {
@@ -510,7 +522,7 @@ func (s *Scheduler) refreshBalances() {
 		if err != nil {
 			continue
 		}
-		s.cfg.Pool.SetExpiry(st.UID, upstream.SoonestExpiry(packs))
+		s.cfg.Pool.SetPacks(st.UID, packsFromEnt(packs))
 		s.cfg.Pool.SetCredits(st.UID, remain)
 	}
 }

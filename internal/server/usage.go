@@ -70,6 +70,9 @@ func (s *UsageStore) loadFile() {
 			s.entries = append(s.entries, e)
 		}
 	}
+	// 常规追加天然升序；但轮转副本回写 / 手工整理过文件可能乱序，
+	// 趋势分桶以首末条为界，这里统一按 ts 升序兜底。
+	sort.Slice(s.entries, func(i, j int) bool { return s.entries[i].TS < s.entries[j].TS })
 	if len(s.entries) > s.max {
 		s.entries = s.entries[len(s.entries)-s.max:]
 	}
@@ -233,17 +236,37 @@ func (s *UsageStore) Recent(n int) []UsageEntry {
 	return out
 }
 
-// Since 返回 ts >= cutoff 的条目（时间升序）。
+// Since 返回 ts >= cutoff 的条目（时间升序，调用方据此假设分桶/最新在前）。
+// 拷贝后排序，不依赖写入顺序（轮转副本回写、手补历史都可能乱序）。
 func (s *UsageStore) Since(cutoff int64) []UsageEntry {
+	return s.Range(cutoff, 0)
+}
+
+// Range 返回 from <= ts < to 的条目（时间升序）；to<=0 表示不设上界。
+// 环比窗口（前一时段）需要双重边界，普通查询用 Since。
+func (s *UsageStore) Range(from, to int64) []UsageEntry {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	out := make([]UsageEntry, 0, len(s.entries))
 	for _, e := range s.entries {
-		if e.TS >= cutoff {
+		if e.TS >= from && (to <= 0 || e.TS < to) {
 			out = append(out, e)
 		}
 	}
+	s.mu.Unlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].TS < out[j].TS })
 	return out
+}
+
+// Find 按 ts（unix ms）+ uid 定位单条使用记录（detail 兜底展示用）；找不到返回 ok=false。
+func (s *UsageStore) Find(ts int64, uid string) (UsageEntry, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := len(s.entries) - 1; i >= 0; i-- {
+		if s.entries[i].TS == ts && s.entries[i].UID == uid {
+			return s.entries[i], true
+		}
+	}
+	return UsageEntry{}, false
 }
 
 // UsageToday 今日（本地时区自然日）汇总。
@@ -320,6 +343,7 @@ type usageAgg struct {
 	CacheRead  int64   `json:"cache_read"` // 提示词缓存命中 tokens
 	Cost       float64 `json:"cost"`
 	AvgLatency int64   `json:"avg_latency_ms"`
+	MaxLatency int64   `json:"max_latency_ms,omitempty"` // 最慢单笔（上游慢首字节感知）
 	Rate       float64 `json:"rate,omitempty"`
 }
 
@@ -348,46 +372,19 @@ func (h *Handler) adminUsage(w http.ResponseWriter, r *http.Request) {
 	accAgg := map[string]*usageAgg{}
 	modelAgg := map[string]*usageAgg{}
 	for _, e := range entries {
-		totals.Requests++
-		totals.Prompt += e.PromptTokens
-		totals.Completion += e.CompletionTokens
-		totals.Total += e.TotalTokens
-		totals.CacheRead += e.CacheRead
-		totals.Cost += e.Cost
-		totals.AvgLatency += e.DurationMs
-		if e.Status != "ok" {
-			totals.Fails++
-		}
+		aggBump(&totals, e)
 		acc, ok := accAgg[e.UID]
 		if !ok {
 			acc = &usageAgg{Key: e.UID}
 			accAgg[e.UID] = acc
 		}
-		acc.Requests++
-		acc.Prompt += e.PromptTokens
-		acc.Completion += e.CompletionTokens
-		acc.Total += e.TotalTokens
-		acc.CacheRead += e.CacheRead
-		acc.Cost += e.Cost
-		acc.AvgLatency += e.DurationMs
-		if e.Status != "ok" {
-			acc.Fails++
-		}
+		aggBump(acc, e)
 		mm, ok := modelAgg[e.Model]
 		if !ok {
 			mm = &usageAgg{Key: e.Model, Rate: e.Rate}
 			modelAgg[e.Model] = mm
 		}
-		mm.Requests++
-		mm.Prompt += e.PromptTokens
-		mm.Completion += e.CompletionTokens
-		mm.Total += e.TotalTokens
-		mm.CacheRead += e.CacheRead
-		mm.Cost += e.Cost
-		mm.AvgLatency += e.DurationMs
-		if e.Status != "ok" {
-			mm.Fails++
-		}
+		aggBump(mm, e)
 	}
 	finalize := func(a *usageAgg, n int) {
 		a.Cost = round2(a.Cost)
@@ -396,6 +393,23 @@ func (h *Handler) adminUsage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	finalize(&totals, totals.Requests)
+
+	// 环比：上一等长窗口的 totals（window=0 无可比性，不返回）。
+	var prev *usageAgg
+	if window > 0 {
+		now := time.Now()
+		pre := h.usage.Range(now.Add(-2*time.Duration(window)*time.Hour).UnixMilli(),
+			now.Add(-time.Duration(window)*time.Hour).UnixMilli())
+		var pt usageAgg
+		for _, e := range pre {
+			aggBump(&pt, e)
+		}
+		finalize(&pt, pt.Requests)
+		if pt.Requests > 0 {
+			prev = &pt
+		}
+	}
+
 	byAccount := make([]usageAgg, 0, len(accAgg))
 	for _, a := range accAgg {
 		finalize(a, a.Requests)
@@ -415,18 +429,221 @@ func (h *Handler) adminUsage(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.Slice(byModel, func(i, j int) bool { return byModel[i].Cost > byModel[j].Cost })
 
-	// 明细：窗口内最新在前，截断到 limit
-	recent := make([]UsageEntry, 0, len(entries))
+	// 明细：窗口内最新在前，截断到 limit。
+	// 每行附 day（服务器时区日期，与 call-details 文件命名一致）：
+	// 浏览器此前用 UTC 的 toISOString 推日期，与容器时区错位导致明细按日查找 404
+	// （北京时间 0-8 点的记录在多数浏览器上会写错文件名）。day 必发。
+	recent := make([]dayEntry, 0, limit)
 	for i := len(entries) - 1; i >= 0 && len(recent) < limit; i-- {
-		recent = append(recent, entries[i])
+		recent = append(recent, dayEntry{
+			UsageEntry: entries[i],
+			Day:        time.UnixMilli(entries[i].TS).Format("2006-01-02"),
+		})
 	}
+	// 频次序列：服务端分桶聚合（粒度自适应：窗口 ≤48h 或跨度 ≤48h → 按小时，
+	// 否则按日对齐服务器时区）。entries 有容量上限（5000 条），前端自行重排会
+	// 把截断外的请求丢掉——看板趋势一律用这份 series。
+	span := int64(0)
+	if n := len(entries); n > 0 {
+		span = entries[n-1].TS - entries[0].TS
+	}
+	gran := "day"
+	if (window > 0 && window <= 48) || (window == 0 && span <= 48*3600_000) {
+		gran = "hour"
+	}
+	trend := buildUsageSeries(entries, gran)
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"window_hours": window,
+		"granularity":  gran,
+		"series":       trend,
+		"errs":         errStats(entries),
 		"totals":       totals,
+		"prev_totals":  prev,
 		"by_account":   byAccount,
 		"by_model":     byModel,
 		"entries":      recent,
 	})
+}
+
+// aggBump 聚合累加（totals/按账号/按模型共用）：tokens/消耗/失败/均耗时基数/最慢单笔。
+func aggBump(a *usageAgg, e UsageEntry) {
+	a.Requests++
+	a.Prompt += e.PromptTokens
+	a.Completion += e.CompletionTokens
+	a.Total += e.TotalTokens
+	a.CacheRead += e.CacheRead
+	a.Cost += e.Cost
+	a.AvgLatency += e.DurationMs
+	if e.DurationMs > a.MaxLatency {
+		a.MaxLatency = e.DurationMs
+	}
+	if e.Status != "ok" {
+		a.Fails++
+	}
+}
+
+// usageErrStat 错误分类统计（面板「错误透视」用）。
+type usageErrStat struct {
+	Kind   string `json:"kind"`
+	Count  int    `json:"n"`
+	LastTS int64  `json:"last_ts,omitempty"`
+	Sample string `json:"sample,omitempty"` // 最新一条原文（错误全文弹窗/复制）
+}
+
+// classifyUsageErr 错误归类（面板 中文名由前端映射；这里只定 kind）。
+func classifyUsageErr(text string) string {
+	t := strings.ToLower(text)
+	switch {
+	case strings.Contains(t, "全部账号不可用"), strings.Contains(t, "no_healthy"),
+		strings.Contains(t, "无可用账号"), strings.Contains(t, "轮换预算耗尽"), strings.Contains(t, "轮换"):
+		return "all_unavailable"
+	case strings.Contains(t, "429"), strings.Contains(t, "rate limit"), strings.Contains(t, "限流"),
+		strings.Contains(t, "冷却"):
+		return "rate_limited"
+	case strings.Contains(t, "tool call failed"), strings.Contains(t, "not one of"), strings.Contains(t, "400:"):
+		return "call_failed"
+	case strings.Contains(t, "timeout"), strings.Contains(t, "timed out"), strings.Contains(t, "deadline"),
+		strings.Contains(t, "超时"):
+		return "timeout"
+	case strings.Contains(t, "connection"), strings.Contains(t, "reset"), strings.Contains(t, "refused"),
+		strings.Contains(t, "eof"), strings.Contains(t, "handshake"), strings.Contains(t, "dial"),
+		strings.Contains(t, "proxy"), strings.Contains(t, "network"), strings.Contains(t, "broken pipe"):
+		return "network"
+	case strings.Contains(t, "502"), strings.Contains(t, "503"), strings.Contains(t, "504"), strings.Contains(t, "5xx"),
+		strings.Contains(t, "internal server"), strings.Contains(t, "bad gateway"):
+		return "upstream_5xx"
+	case strings.Contains(t, "401"), strings.Contains(t, "403"), strings.Contains(t, "unauthorized"),
+		strings.Contains(t, "forbidden"), strings.Contains(t, "session dead"), strings.Contains(t, "token"):
+		return "auth"
+	case strings.Contains(t, "json"), strings.Contains(t, "parse"), strings.Contains(t, "mapping"), strings.Contains(t, "decode"):
+		return "parse"
+	default:
+		return "other"
+	}
+}
+
+// errStats 窗口内失败聚合：kind → 计数 + 最新时刻 + 最新原文样例。
+func errStats(entries []UsageEntry) []usageErrStat {
+	acc := map[string]*usageErrStat{}
+	for _, e := range entries {
+		if e.Status == "ok" || e.Error == "" {
+			continue
+		}
+		k := classifyUsageErr(e.Error)
+		s := acc[k]
+		if s == nil {
+			s = &usageErrStat{Kind: k}
+			acc[k] = s
+		}
+		s.Count++
+		if e.TS > s.LastTS {
+			s.LastTS = e.TS
+			s.Sample = e.Error
+		}
+	}
+	out := make([]usageErrStat, 0, len(acc))
+	for _, s := range acc {
+		out = append(out, *s)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Count != out[j].Count {
+			return out[i].Count > out[j].Count
+		}
+		return out[i].LastTS > out[j].LastTS
+	})
+	if len(out) > 8 {
+		out = out[:8]
+	}
+	return out
+}
+
+// usageSeriesPoint 趋势单桶：请求量（含失败拆分）、tokens、估算消耗、平均/最慢单笔耗时与错误抽样。
+type usageSeriesPoint struct {
+	Bucket    string  `json:"b"` // "2006-01-02T15"（小时桶）或 "2006-01-02"（日桶）
+	Requests  int64   `json:"req"`
+	Fails     int64   `json:"fail"`
+	Prompt    int64   `json:"pt"`
+	Completed int64   `json:"ct"`
+	CacheRead int64   `json:"cr"`
+	Cost      float64 `json:"cost"`
+	AvgMs     int64   `json:"ms"`
+	MaxMs     int64   `json:"mx,omitempty"` // 桶内最慢单笔（>60s 即上游慢首字节高发时段）
+	ErrText   string  `json:"err,omitempty"`
+}
+
+// buildUsageSeries 分桶 + 补空桶（首桶到末桶之间连续），AvgMs 用桶内请求数归一。
+func buildUsageSeries(entries []UsageEntry, gran string) []usageSeriesPoint {
+	if len(entries) == 0 {
+		return []usageSeriesPoint{}
+	}
+	fmtKey := "2006-01-02"
+	if gran == "hour" {
+		fmtKey = "2006-01-02T15"
+	}
+	trunc := func(t time.Time) time.Time {
+		if gran == "hour" {
+			return t.Truncate(time.Hour)
+		}
+		// 日桶必须对齐服务器时区的自然日零点（time.Truncate 按绝对时间截断，
+		// UTC+8 下会切在 08:00，与 call-details 文件日期错位）。
+		y, m, d := t.Date()
+		return time.Date(y, m, d, 0, 0, 0, 0, t.Location())
+	}
+	agg := map[string]*usageSeriesPoint{}
+	for i := range entries {
+		e := entries[i]
+		b := trunc(time.UnixMilli(e.TS)).Format(fmtKey)
+		p := agg[b]
+		if p == nil {
+			p = &usageSeriesPoint{Bucket: b}
+			agg[b] = p
+		}
+		p.Requests++
+		if e.Status != "ok" {
+			p.Fails++
+			if p.ErrText == "" && e.Error != "" {
+				p.ErrText = e.Error
+			}
+		}
+		p.Prompt += e.PromptTokens
+		p.Completed += e.CompletionTokens
+		p.CacheRead += e.CacheRead
+		p.Cost += e.Cost
+		p.AvgMs += e.DurationMs
+		if e.DurationMs > p.MaxMs {
+			p.MaxMs = e.DurationMs
+		}
+	}
+	start := trunc(time.UnixMilli(entries[0].TS))
+	end := trunc(time.UnixMilli(entries[len(entries)-1].TS))
+	out := make([]usageSeriesPoint, 0, 32)
+	for capGuard := 0; capGuard < 800; capGuard++ {
+		b := start.Format(fmtKey)
+		p := agg[b]
+		if p == nil {
+			p = &usageSeriesPoint{Bucket: b}
+		} else if p.Requests > 0 {
+			p.AvgMs /= p.Requests
+			p.Cost = round2(p.Cost)
+		}
+		out = append(out, *p)
+		if !start.Before(end) {
+			break
+		}
+		if gran == "day" {
+			start = start.AddDate(0, 0, 1)
+		} else {
+			start = start.Add(time.Hour)
+		}
+	}
+	return out
+}
+
+// dayEntry 使用记录 + 服务器时区日期（前端按此查 call-details 当日文件）。
+type dayEntry struct {
+	UsageEntry
+	Day string `json:"day"`
 }
 
 // nicknameFor 账号昵称（面板展示用）。
@@ -444,22 +661,56 @@ var drNonOfficialModels = map[string]bool{"free-stack": true, "combo": true, "su
 
 // adminUsageDetail GET /admin/api/usage/detail?day=YYYY-MM-DD&ts=<unix ms>&uid=<uid>：
 // 返回单笔请求的完整明细（上游请求参数、返回内容、系统提示词）。
+// 兜底链：day 缺失/查无 → 按服务器时区从 ts 重算日期重试 → 仍无则返回 usage 行
+// 兜底数据（fallback:true，弹窗至少能看到错误全文与耗时，不再空白报错）。
 func (h *Handler) adminUsageDetail(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	day, ts, uid := q.Get("day"), q.Get("ts"), q.Get("uid")
+	day, tsS, uid := q.Get("day"), q.Get("ts"), q.Get("uid")
 	var tsN int64
-	if n, err := strconv.ParseInt(ts, 10, 64); err == nil {
+	if n, err := strconv.ParseInt(tsS, 10, 64); err == nil {
 		tsN = n
 	}
-	if day == "" && tsN > 0 {
-		day = time.UnixMilli(tsN).Format("2006-01-02")
+	serverDay := ""
+	if tsN > 0 {
+		serverDay = time.UnixMilli(tsN).Format("2006-01-02")
 	}
-	d, err := h.details.Get(day, tsN, uid)
-	if err != nil {
-		writeOpenAIError(w, http.StatusNotFound, "not_found", "明细不存在或已过保留期（30 天）")
+	if day != "" && tsN > 0 {
+		if d, err := h.details.Get(day, tsN, uid); err == nil {
+			writeJSON(w, http.StatusOK, d)
+			return
+		}
+	}
+	// day 缺失或按客户端给的 day 没找到：以服务器时区日期为准再试一次
+	// （旧前端/时区错位文件名都会在这里被纠正）。
+	if serverDay != "" && serverDay != day {
+		if d, err := h.details.Get(serverDay, tsN, uid); err == nil {
+			writeJSON(w, http.StatusOK, d)
+			return
+		}
+	}
+	if tsN == 0 {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "ts 参数缺失或非法（unix ms）")
 		return
 	}
-	writeJSON(w, http.StatusOK, d)
+	// 归档缺失（过保留期 / 未落档 / 归档清空）：给出 usage 行兜底，错误正文完整可见。
+	if e, ok := h.usage.Find(tsN, uid); ok {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"fallback":      true,
+			"day":           serverDay,
+			"model":         e.Model,
+			"status":        e.Status,
+			"error":         e.Error,
+			"uid":           e.UID,
+			"duration_ms":   e.DurationMs,
+			"ts":            e.TS,
+			"stream":        e.Stream,
+			"prompt_tokens": e.PromptTokens, "completion_tokens": e.CompletionTokens,
+			"total_tokens": e.TotalTokens, "cache_read": e.CacheRead,
+			"note": "该请求的完整归档已过保留期或未落档（如全账号不可用、请求早失败不产生上游响应）；以下为使用记录中的摘要信息",
+		})
+		return
+	}
+	writeOpenAIError(w, http.StatusNotFound, "not_found", "明细档案不存在（已过 30 天保留期，且使用记录中无对应行）")
 }
 
 // adminRatesGet GET /admin/api/rates：官方模型倍率表（get_detail_param

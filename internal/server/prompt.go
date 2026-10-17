@@ -102,6 +102,7 @@ func applyPromptPolicy(body []byte, cfg PromptConfig, dataDir string) []byte {
 	if !ok {
 		return body
 	}
+	normalizeOpenAIRoles(msgs)
 	// 收集调用方全部 system 文本；其余消息原样保留（保持顺序）
 	var callerSys []string
 	kept := make([]any, 0, len(msgs))
@@ -150,6 +151,26 @@ func applyPromptPolicy(body []byte, cfg PromptConfig, dataDir string) []byte {
 		return body
 	}
 	return out
+}
+
+// normalizeOpenAIRoles 消息级角色别名归一：
+// developer（OpenAI 新式 system 语义，o 系/Codex 客户端发）→ system；
+// 旧 ChatML 残留 "role"（字符串）→ user。放在策略入口，保证 demote/auto/trae
+// 各模式按标准角色工作，也与 upstream.PrepareBody 的归一化一致。
+func normalizeOpenAIRoles(msgs []any) {
+	for _, v := range msgs {
+		m, ok := v.(map[string]any)
+		if !ok {
+			continue
+		}
+		r, _ := m["role"].(string)
+		switch strings.ToLower(strings.TrimSpace(r)) {
+		case "developer":
+			m["role"] = "system"
+		case "role":
+			m["role"] = "user"
+		}
+	}
 }
 
 // extractMessageText 从 OpenAI 消息 content（string 或多模态数组）提取纯文本。
