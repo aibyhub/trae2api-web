@@ -1,6 +1,7 @@
 // Package pool 账号池：内存索引 + 冷却/禁用状态机 + state.json 持久化。
-// 挑选策略：healthy 账号中积分最近过期者优先（用掉快过期的额度），
-// 同过期时间比剩余积分；过期信息未知时退化为积分最多者。
+// 挑选策略：healthy 账号中积分最近过期日优先（用掉快过期的额度），
+// 同过期日比「近期使用降权后」的剩余积分（把流量摊开）；过期信息未知时退化为积分最多者。
+// 积分变化会同步记入 data/credits.jsonl（余额轨迹，面板图表用）。
 package pool
 
 import (
@@ -74,7 +75,16 @@ type entry struct {
 	transportReason string
 	lastCheckinAt   int64  // 最近签到时间（unix 秒）
 	lastCheckin     string // 最近签到结果
+	pickStamps      []time.Time // 近 1h 成功调用节拍（内存态）：同过期日积分对比时按此降权
 }
+
+// 选号均衡参数：同过期日的账号比较「近窗降权积分」，公平除数 = 1 + decay × 近 1h
+// 成功笔数（笔数封顶 cap），近期多用者让位，把流量摊到同期到期包之间。
+const (
+	fairnessWindow = time.Hour
+	fairnessCap    = 16
+	fairnessDecay  = 0.25
+)
 
 func (e *entry) healthy(now time.Time) bool {
 	if e.disabled || !e.enabled {
@@ -112,13 +122,17 @@ type Pool struct {
 	mu      sync.RWMutex
 	byUID   map[string]*entry
 	stateFp string
+	creditFp string // credits.jsonl（积分余额轨迹）；空 = 不记录
 }
 
-// New 构建池；stateFp 非空时尝试加载旧状态。
+// New 构建池；stateFp 非空时尝试加载旧状态，并把积分轨迹定在 stateFp 同目录（data/credits.jsonl）。
 func New(stateFp string) *Pool {
 	p := &Pool{byUID: map[string]*entry{}, stateFp: stateFp}
 	if stateFp != "" {
 		p.load()
+		if dir := filepath.Dir(stateFp); dir != "" {
+			p.creditFp = filepath.Join(dir, "credits.jsonl")
+		}
 	}
 	return p
 }
@@ -196,7 +210,7 @@ func (p *Pool) Pick() *auth.Auth {
 }
 
 // PickExcluding 同上，但跳过 tried 中的 uid（请求级轮换）。
-// 选号优先级：积分最近过期的账号优先（用过期前的额度），同期按剩余积分。
+// 选号优先级：积分最近过期日优先（用过期前的额度），同日比近期使用降权后的积分；
 // expireAt 未知（0）视为最晚，排在使用已知过期信息的账号之后。
 func (p *Pool) PickExcluding(tried map[string]bool) *auth.Auth {
 	p.mu.RLock()
@@ -210,7 +224,7 @@ func (p *Pool) PickExcluding(tried map[string]bool) *auth.Auth {
 		if !e.healthy(now) {
 			continue
 		}
-		if best == nil || expireFirst(e, best) {
+		if best == nil || expireFirst(e, best, now) {
 			best = e
 		}
 	}
@@ -220,19 +234,56 @@ func (p *Pool) PickExcluding(tried map[string]bool) *auth.Auth {
 	return best.a
 }
 
-// expireFirst 报告 a 是否应排在 b 之前（积分过期早者优先，未知者靠后；同过期比积分）。
-func expireFirst(a, b *entry) bool {
-	ea, eb := a.expireAt, b.expireAt
-	if ea == 0 {
-		ea = math.MaxInt64
-	}
-	if eb == 0 {
-		eb = math.MaxInt64
-	}
+// expireFirst 报告 a 是否应排在 b 之前（先用掉快过期的额度，同时把流量摊开）。
+// 主序：最近过期日优先 —— 按 UTC 日分桶比较（按秒精确比会把 tie-break 架空：
+// 两个同日过期的账号只差几分几秒时，旧逻辑永远固定粘住稍早几秒的那个，长期忽略其他号）。
+// 同桶：比「近 1h 使用」降权后的积分（近期多用者让位）；降权后仍并列退回原始积分保证确定性。
+func expireFirst(a, b *entry, now time.Time) bool {
+	ea, eb := expireBucket(a.expireAt), expireBucket(b.expireAt)
 	if ea != eb {
 		return ea < eb
 	}
+	if fa, fb := fairCredits(a, now), fairCredits(b, now); fa != fb {
+		return fa > fb
+	}
 	return a.credits > b.credits
+}
+
+// expireBucket 过期时刻按 UTC 日分桶（86400s/桶）；0（未知）视为最晚。
+func expireBucket(expireAt int64) int64 {
+	if expireAt <= 0 {
+		return math.MaxInt64
+	}
+	return expireAt / 86400
+}
+
+// fairCredits 近窗使用降权后的积分：credits / (1 + decay × 近 1h 成功笔数)，笔数封顶。
+func fairCredits(e *entry, now time.Time) float64 {
+	cutoff := now.Add(-fairnessWindow)
+	n := 0
+	for _, ts := range e.pickStamps {
+		if ts.After(cutoff) {
+			n++
+		}
+	}
+	if n > fairnessCap {
+		n = fairnessCap
+	}
+	return float64(e.credits) / (1 + fairnessDecay*float64(n))
+}
+
+// notePickLocked 记一笔近期成功调用节拍，并修剪窗外与超额头寸。
+func (e *entry) notePickLocked(now time.Time) {
+	e.pickStamps = append(e.pickStamps, now)
+	cutoff := now.Add(-fairnessWindow)
+	i := 0
+	for i < len(e.pickStamps) && !e.pickStamps[i].After(cutoff) {
+		i++
+	}
+	e.pickStamps = e.pickStamps[i:]
+	if len(e.pickStamps) > fairnessCap {
+		e.pickStamps = e.pickStamps[len(e.pickStamps)-fairnessCap:]
+	}
 }
 
 // SetExpiry 记录账号最近一份仍有余量的权益包过期时刻（unix 秒；0 = 未知）。
@@ -245,14 +296,28 @@ func (p *Pool) SetExpiry(uid string, expireAt int64) {
 	}
 }
 
-// SetCredits 更新账号积分。
+// SetCredits 更新账号积分（有变化时记一条 credits.jsonl 轨迹）。
 func (p *Pool) SetCredits(uid string, credits int64) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.setCreditsLocked(uid, credits, "refresh")
+	p.saveLocked()
+	p.mu.Unlock()
+}
+
+// setCreditsLocked 更新积分；有变化时把变更记进 credits.jsonl。需持锁。
+func (p *Pool) setCreditsLocked(uid string, credits int64, source string) {
 	if e, ok := p.byUID[uid]; ok {
+		if e.credits != credits {
+			p.appendCreditLocked(creditLine{
+				TS:      time.Now().Unix(),
+				UID:     uid,
+				Credits: credits,
+				Delta:   credits - e.credits,
+				Source:  source,
+			})
+		}
 		e.credits = credits
 	}
-	p.saveLocked()
 }
 
 // Cooldown 冷却账号至 now+d。
@@ -279,11 +344,11 @@ func (p *Pool) Disable(uid, reason string) {
 }
 
 // ReenableIfCredits 签到后解冻：仅当 remain > 0 且账号处于冷却（非禁用）时恢复。
+// 积分变化记 credits.jsonl（source=checkin）。
 func (p *Pool) ReenableIfCredits(uid string, remain int64) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.setCreditsLocked(uid, remain, "checkin")
 	if e, ok := p.byUID[uid]; ok {
-		e.credits = remain
 		if remain > 0 && !e.disabled {
 			e.until = time.Time{}
 			e.reason = ""
@@ -291,6 +356,7 @@ func (p *Pool) ReenableIfCredits(uid string, remain int64) {
 		}
 	}
 	p.saveLocked()
+	p.mu.Unlock()
 }
 
 // NoteError 记录一次错误；达到 threshold 自动冷却 d 时长。
@@ -308,7 +374,8 @@ func (p *Pool) NoteError(uid string, threshold int, d time.Duration) {
 	p.saveLocked()
 }
 
-// NoteSuccess 成功请求重置错误计数，并清除出口故障隔离。
+// NoteSuccess 成功请求重置错误计数、清除出口故障隔离，并记一笔近期成功节拍
+// （同过期日积分对比的降权依据）。
 func (p *Pool) NoteSuccess(uid string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -316,6 +383,7 @@ func (p *Pool) NoteSuccess(uid string) {
 		e.errCount = 0
 		e.transportUntil = time.Time{}
 		e.transportReason = ""
+		e.notePickLocked(time.Now())
 	}
 }
 

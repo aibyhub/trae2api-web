@@ -178,6 +178,7 @@
     <div class="tab active" onclick="switchTab('accounts',this)">账号管理</div>
     <div class="tab" onclick="switchTab('credits',this)">额度监控</div>
     <div class="tab" onclick="switchTab('usage',this)">使用记录</div>
+    <div class="tab" onclick="switchTab('charts',this)">使用图表</div>
     <div class="tab" onclick="switchTab('rates',this)">官方倍率</div>
     <div class="tab" onclick="switchTab('proxies',this)">代理池</div>
   </div>
@@ -250,6 +251,22 @@
     <div class="panel">
       <h2>数据维护<small style="color:var(--dim);font-weight:400;margin-left:8px">日志保留与清理（usage.jsonl / checkin.jsonl，默认保留 90 天）</small></h2>
       <div id="logMaintenance"><div class="muted"><span class="spin"></span> 加载中...</div></div>
+    </div>
+  </div>
+
+  <!-- 使用图表 -->
+  <div id="pane-charts" class="pane">
+    <div class="panel">
+      <h2>近 14 天调用量<small style="color:var(--dim);font-weight:400;margin-left:8px">按日堆叠（绿·成功 / 红·失败），柱顶为当日最慢单笔（>60s 即上游慢首字节高发日）</small></h2>
+      <div id="chartDaily"><div class="muted"><span class="spin"></span> 加载中...</div></div>
+    </div>
+    <div class="panel">
+      <h2>积分余额轨迹<small style="color:var(--dim);font-weight:400;margin-left:8px">credits.jsonl 变更点连线（近 14 天），图例末尾为当前余额；v1.4.0 起累积</small></h2>
+      <div id="chartCredits"></div>
+    </div>
+    <div class="panel">
+      <h2>权益包到期倒计时<small style="color:var(--dim);font-weight:400;margin-left:8px">按过期时刻升序，3 天内标黄</small></h2>
+      <div id="chartExpiry" class="tblwrap"><div class="muted"><span class="spin"></span> 加载中...</div></div>
     </div>
   </div>
 
@@ -343,6 +360,7 @@ function refreshActive(){
   if(activeTab==='accounts'){ loadAccounts(); loadCheckin(); }
   else if(activeTab==='credits') loadCredits();
   else if(activeTab==='usage'){ loadUsage(); loadLogs(); }
+  else if(activeTab==='charts') loadCharts();
   else if(activeTab==='rates') loadRates();
   else if(activeTab==='proxies') loadProxies();
 }
@@ -875,6 +893,100 @@ async function testProxy(uid){
     if(d.ok){ st.className='status-line ok'; st.textContent='连通正常：'+(d.latency_ms)+'ms，剩余 '+fmt(d.remain)+' 积分（代理 '+(d.proxy||'直连')+'）'; }
     else { st.className='status-line err'; st.textContent='失败：'+(d.error||'未知')+'（代理 '+(d.proxy||'直连')+'，'+(d.latency_ms||'?')+'ms）'; }
   }catch(e){ st.className='status-line err'; st.textContent='测试失败：'+e.message; }
+}
+/* ─── 使用图表 ─── */
+const chartPalette = ['#5aa2ff','#34d399','#fbbf24','#f472b6','#a78bfa','#38bdf8','#fb7185','#f97316'];
+function uidShort(u){ return String(u||'').slice(-4)||'?'; }
+async function loadCharts(){
+  try{
+    const r = await fetch('/admin/api/charts', {cache:'no-store'});
+    const d = await r.json();
+    renderDailyChart(d.daily||[]);
+    renderCreditChart(d.credits||[]);
+    renderExpiryTable(d.expiry||[], d.now||Math.floor(Date.now()/1000));
+    document.getElementById('ts').textContent = '更新于 ' + new Date().toLocaleTimeString();
+  }catch(e){
+    ['chartDaily','chartCredits','chartExpiry'].forEach(id=>{
+      const el=document.getElementById(id); if(el) el.innerHTML = '<div style="color:var(--bad);padding:14px">加载失败：'+esc(e.message)+'</div>';
+    });
+  }
+}
+function renderDailyChart(list){
+  const el = document.getElementById('chartDaily');
+  if(!list.some(d=>d.ok||d.error)){ el.innerHTML='<div class="muted" style="padding:14px">窗口内无调用记录</div>'; return; }
+  const W=780,H=240,L=40,B=26,T=16,R=10, plotH=H-T-B;
+  const max = Math.max(1, ...list.map(d=>d.ok+d.error));
+  const step=(W-L-R)/list.length, bw=Math.max(8,step*0.6);
+  let s = '<svg viewBox="0 0 '+W+' '+H+'" style="width:100%;height:auto">';
+  for(let i=0;i<=4;i++){
+    const y=T+plotH-plotH*i/4;
+    s += '<line x1="'+L+'" y1="'+y+'" x2="'+(W-R)+'" y2="'+y+'" stroke="rgba(255,255,255,.06)"/>';
+    s += '<text x="'+(L-5)+'" y="'+(y+4)+'" fill="#8b95a9" font-size="10" text-anchor="end">'+fmt(Math.round(max*i/4))+'</text>';
+  }
+  list.forEach((d,i)=>{
+    const x=L+step*i+(step-bw)/2;
+    const hOK=Math.round(plotH*(d.ok)/max), hErr=Math.round(plotH*(d.error)/max);
+    const yOK=T+plotH-hOK, yErr=yOK-hErr;
+    if(d.ok) s += '<rect x="'+x+'" y="'+yOK+'" width="'+bw+'" height="'+hOK+'" fill="#34d399" rx="2"><title>'+d.date+' 成功 '+d.ok+'</title></rect>';
+    if(d.error) s += '<rect x="'+x+'" y="'+yErr+'" width="'+bw+'" height="'+hErr+'" fill="#ef6461" rx="2"><title>'+d.date+' 失败 '+d.error+'</title></rect>';
+    if(d.max_ms){
+      const top=(d.error?yErr:yOK)-7;
+      s += '<text x="'+(x+bw/2)+'" y="'+top+'" fill="'+(d.max_ms>60000?'var(--warn)':'#8b95a9')+'" font-size="9" text-anchor="middle">'+(d.max_ms>60000?Math.round(d.max_ms/1000)+'s':Math.round(d.max_ms/1000)+'s')+'</text>';
+    }
+    if(i%2===0) s += '<text x="'+(x+bw/2)+'" y="'+(H-8)+'" fill="#8b95a9" font-size="9" text-anchor="middle">'+d.date.slice(5)+'</text>';
+  });
+  s += '</svg>';
+  el.innerHTML = s;
+}
+function renderCreditChart(list){
+  const el=document.getElementById('chartCredits') || document.querySelector('#pane-charts #chartCredits');
+  const act=(list||[]).filter(x=>x.points && x.points.length>1);
+  if(!act.length){ el.innerHTML='<div class="muted" style="padding:14px">暂无余额变更点（credits 随签到/余额刷新产生，v1.4.0 起累积）</div>'; return; }
+  const W=780,H=250,L=56,B=26,T=20,R=10, plotH=H-T-B, plotW=W-L-R;
+  let minTs=Infinity, maxTs=-Infinity, maxC=0;
+  act.forEach(x=>x.points.forEach(p=>{ if(p.ts<minTs)minTs=p.ts; if(p.ts>maxTs)maxTs=p.ts; if(p.credits>maxC)maxC=p.credits; }));
+  const span=Math.max(1,maxTs-minTs), maxCV=Math.max(1,maxC);
+  let s='<svg viewBox="0 0 '+W+' '+H+'" style="width:100%;height:auto">';
+  for(let i=0;i<=4;i++){
+    const y=T+plotH-plotH*i/4;
+    s += '<line x1="'+L+'" y1="'+y+'" x2="'+(W-R)+'" y2="'+y+'" stroke="rgba(255,255,255,.06)"/>';
+    s += '<text x="'+(L-5)+'" y="'+(y+4)+'" fill="#8b95a9" font-size="10" text-anchor="end">'+fmt(Math.round(maxCV*i/4))+'</text>';
+  }
+  [0,.25,.5,.75,1].forEach(f=>{
+    const x=L+plotW*f;
+    const dt=new Date((minTs+span*f)*1000);
+    s += '<text x="'+x+'" y="'+(H-8)+'" fill="#8b95a9" font-size="9" text-anchor="middle">'+(dt.getMonth()+1)+'-'+dt.getDate()+'</text>';
+  });
+  let lx=L;
+  act.forEach((ser,i)=>{
+    const c=chartPalette[i%chartPalette.length];
+    const pts=ser.points.map(p=>(L+plotW*(p.ts-minTs)/span).toFixed(1)+','+(T+plotH-plotH*p.credits/maxCV).toFixed(1)).join(' ');
+    s += '<polyline points="'+pts+'" fill="none" stroke="'+c+'" stroke-width="2" stroke-linejoin="round"><title>'+esc(ser.uid)+'</title></polyline>';
+    const label=uidShort(ser.uid)+' '+fmt(ser.current);
+    s += '<rect x="'+lx+'" y="2" width="10" height="10" fill="'+c+'" rx="2"/>';
+    s += '<text x="'+(lx+14)+'" y="11" fill="#c9d1e3" font-size="10">'+esc(label)+'</text>';
+    lx += 14+label.length*6.6+16;
+  });
+  s += '</svg>';
+  el.innerHTML = s;
+}
+function renderExpiryTable(list, now){
+  const el=document.getElementById('chartExpiry');
+  if(!list.length){ el.innerHTML='<div class="muted" style="padding:14px">无账号</div>'; return; }
+  const rows=list.map(a=>{
+    let when='<span class="muted">未知（等待余额刷新回填）</span>';
+    if(a.expire_at){
+      const left=now-a.expire_at; // >0 已过
+      if(left>=0) when='<span style="color:var(--bad)">已过期 '+fmt(-left/86400|0)+' 天</span>';
+      else {
+        const dl=Math.floor(-left/86400), hl=Math.floor((-left%86400)/3600);
+        const urgent=(-left)<3*86400;
+        when='<span'+(urgent?' style="color:var(--warn)"':'')+'>'+dl+'天'+hl+'小时</span>'+(urgent?'<span style="color:var(--warn)">（近 3 天）</span>':'');
+      }
+    }
+    return '<tr><td>'+esc(a.nickname||'-')+'</td><td class="mono">'+esc(String(a.uid).slice(-8))+'</td><td class="mono">'+fmt(a.credits)+'</td><td>'+when+'</td></tr>';
+  });
+  el.innerHTML='<table class="accts"><thead><tr><th>账号</th><th>UID 尾号</th><th>积分</th><th>最近到期包剩余</th></tr></thead><tbody>'+rows.join('')+'</tbody></table>';
 }
 
 /* ─── 代理池 ─── */

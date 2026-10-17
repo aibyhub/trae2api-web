@@ -19,6 +19,17 @@ import (
 	"trae2api-web/internal/upstream"
 )
 
+// 流式守护参数：
+//   - heartbeatInterval：上游静默期间向客户端发 SSE 注释心跳的间隔（防中间代理/
+//     客户端读超时）。注释行不进入 JSON 事件流，OpenAI 兼容 SDK 一律忽略。
+//   - rotateBudget：流式请求「等上游首字节」阶段的总预算——预算内允许逐号轮换，
+//     超出直接给流内 error 终态（历史上慢首字节集中爆发时曾出现逐号 ×120s 的
+//     无限串行悬挂，客户端全程无字节）。
+const (
+	heartbeatInterval = 5 * time.Second
+	rotateBudget      = 5 * time.Minute
+)
+
 // Config handler 依赖。
 type Config struct {
 	Pool         *pool.Pool
@@ -163,6 +174,7 @@ func NewHandler(cfg Config) *Handler {
 	// 使用日志 + 官方模型倍率 + 代理池
 	h.mux.HandleFunc("GET /admin/api/usage", h.adminUsage)
 	h.mux.HandleFunc("GET /admin/api/usage/detail", h.withAdminAuth(h.adminUsageDetail))
+	h.mux.HandleFunc("GET /admin/api/charts", h.adminCharts)
 	h.mux.HandleFunc("GET /admin/api/rates", h.adminRatesGet)
 	h.mux.HandleFunc("GET /admin/api/proxies", h.withAdminAuth(h.adminProxiesGet))
 	h.mux.HandleFunc("POST /admin/api/proxies", h.withAdminAuth(h.adminProxiesAdd))
@@ -502,7 +514,48 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	tried := map[string]bool{}
 	var lastErr error
+
+	// 流式请求：先把 SSE 头 + 首个心跳注释发给客户端，再进轮换。
+	// 之后上游首字节慢（120s 头等待悬挂）时客户端已拿 200 且线上有心跳流动，
+	// 不再空等/断连；轮换与重试对客户端不可见，终态失败走流内 error 事件。
+	// sw != nil 即「头已提交」，此后不得再发非 SSE 响应（401/413 等早校验在此前已完成）。
+	var sw *heartbeatWriter
+	var heartbeatDone chan struct{}
+	if peek.Stream {
+		if fl, ok := w.(http.Flusher); ok && fl != nil {
+			h := w.Header()
+			h.Set("Content-Type", "text/event-stream")
+			h.Set("Cache-Control", "no-cache")
+			h.Set("Connection", "keep-alive")
+			h.Set("X-Accel-Buffering", "no")
+			w.WriteHeader(http.StatusOK)
+			sw = &heartbeatWriter{w: w, fl: fl}
+			_, _ = sw.Write([]byte(": ping\n\n"))
+			sw.Flush()
+			heartbeatDone = make(chan struct{})
+			var hbWG sync.WaitGroup
+			hbWG.Add(1)
+			go func() {
+				defer hbWG.Done()
+				runHeartbeat(sw, heartbeatDone)
+			}()
+			defer func() {
+				close(heartbeatDone)
+				hbWG.Wait()
+			}()
+		}
+	}
+	var rotateDeadline time.Time
+	if sw != nil {
+		rotateDeadline = time.Now().Add(rotateBudget)
+	}
+
 	for i := 0; i < h.cfg.MaxRotate; i++ {
+		if !rotateDeadline.IsZero() && time.Now().After(rotateDeadline) {
+			lastErr = fmt.Errorf("upstream slow episode: rotation budget (%v) exhausted before any upstream data", rotateBudget)
+			log.Printf("chat rotation: budget exhausted (%.0fs), stop rotating", rotateBudget.Seconds())
+			break
+		}
 		acct := h.cfg.Pool.PickExcluding(tried)
 		if acct == nil {
 			break
@@ -574,8 +627,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if peek.Stream {
 			h.cfg.Pool.NoteSuccess(acct.UID)
 			// 流内业务错误（1005 plan/5xx 等）→ 冷却账号，错误信息注入 SSE。
+			// sw（互斥包装）同时被心跳 goroutine 使用，避免与 chunk 写交错。
 			var streamErrMsg string
-			_ = upstream.StreamWithHooks(w, rc, configName, func(se *upstream.SOLOStreamError) {
+			_ = upstream.StreamWithHooks(sw, rc, configName, func(se *upstream.SOLOStreamError) {
 				h.handleStreamError(acct.UID, se)
 				streamErrMsg = fmt.Sprintf("code=%d %s", se.Code, se.Msg)
 			}, func(m map[string]any) { recUsage = m }, func(delta map[string]any) {
@@ -638,6 +692,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		msg += ": " + lastErr.Error()
 	}
 	record("error", msg)
+	if sw != nil {
+		// SSE 头已提交：终态以流内 error 事件 + [DONE] 收尾（客户端全程保持在线）。
+		writeSSETerminalError(sw, msg)
+		return
+	}
 	writeOpenAIError(w, http.StatusServiceUnavailable, "no_healthy_account", msg)
 }
 

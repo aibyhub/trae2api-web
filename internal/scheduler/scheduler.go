@@ -10,9 +10,11 @@ import (
 	"fmt"
 	"log"
 	"math/rand/v2"
+	"net"
 	"strings"
 	"time"
 
+	"trae2api-web/internal/auth"
 	"trae2api-web/internal/pool"
 	"trae2api-web/internal/upstream"
 )
@@ -203,6 +205,65 @@ func (s *Scheduler) CheckinUID(uid string) Result { return s.checkinUID(uid, fal
 // CheckinUIDManual 面板手动触发（仅影响日志里的 manual 标记）。
 func (s *Scheduler) CheckinUIDManual(uid string) Result { return s.checkinUID(uid, true) }
 
+// 签到瞬时故障重试：1 次原始 + 2 次重试，按 3s→6s 退避（仍在抖动窗口内可完成）。
+// 业务拒绝（9074 设备未注册 / 9095 已签 / 权限）不是瞬时故障，不重试。
+const (
+	checkinMaxAttempts = 3
+	checkinRetryBase   = 3 * time.Second
+)
+
+// transientNetErr 判定是否传输层瞬时故障（值得重试）：
+// 超时族（net timeout / context deadline）、TLS 握手失败、连接建立/读写失败、EOF。
+func transientNetErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return true
+	}
+	s := strings.ToLower(err.Error())
+	for _, kw := range []string{
+		"timeout", "deadline", "handshake", "tls:",
+		"connection refused", "connection reset", "broken pipe", "connection closed",
+		"proxyconnect", "unexpected eof", ": eof", "network is unreachable", "no such host",
+	} {
+		if strings.Contains(s, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// checkinStatusWithRetry CheckinStatus 的瞬时故障重试外壳。
+func (s *Scheduler) checkinStatusWithRetry(a *auth.Auth) (checkedIn bool, credits int64, enable bool, err error) {
+	for attempt := 1; ; attempt++ {
+		checkedIn, credits, enable, err = s.cfg.Upstream.CheckinStatus(a)
+		if err == nil || attempt >= checkinMaxAttempts || !transientNetErr(err) {
+			return
+		}
+		delay := checkinRetryBase << (attempt - 1)
+		log.Printf("checkin status uid=%s: transient error %v — retry in %s (attempt %d/%d)", a.UID, err, delay, attempt+1, checkinMaxAttempts)
+		time.Sleep(delay)
+	}
+}
+
+// checkinClaimWithRetry CheckinClaim 的瞬时故障重试外壳（claim 幂等，重放安全）。
+func (s *Scheduler) checkinClaimWithRetry(a *auth.Auth) error {
+	for attempt := 1; ; attempt++ {
+		err := s.cfg.Upstream.CheckinClaim(a)
+		if err == nil || attempt >= checkinMaxAttempts || !transientNetErr(err) {
+			return err
+		}
+		delay := checkinRetryBase << (attempt - 1)
+		log.Printf("checkin claim uid=%s: transient error %v — retry in %s (attempt %d/%d)", a.UID, err, delay, attempt+1, checkinMaxAttempts)
+		time.Sleep(delay)
+	}
+}
+
 func (s *Scheduler) checkinUID(uid string, manual bool) Result {
 	a := s.cfg.Pool.AuthByUID(uid)
 	if a == nil || a.RefreshTokenValue() == "" {
@@ -212,7 +273,7 @@ func (s *Scheduler) checkinUID(uid string, manual bool) Result {
 	}
 	res := Result{UID: uid}
 	// 签到（status → 未签到则 claim）
-	checkedIn, _, enable, err := s.cfg.Upstream.CheckinStatus(a)
+	checkedIn, _, enable, err := s.checkinStatusWithRetry(a)
 	switch {
 	case err != nil:
 		res.Status = "error"
@@ -229,7 +290,7 @@ func (s *Scheduler) checkinUID(uid string, manual bool) Result {
 		// 重放无意义——单次失败即返回，让错误原样暴露给面板。
 		// 9095「当前设备今日已经签到」：共享注册设备号（TW2A_UG_DEVICE_ID）时
 		// 当日名额已被占，语义等同已签到，不算错误。
-		if claimErr := s.cfg.Upstream.CheckinClaim(a); claimErr != nil {
+		if claimErr := s.checkinClaimWithRetry(a); claimErr != nil {
 			if strings.Contains(claimErr.Error(), "9095") {
 				res.Status = "already"
 				log.Printf("checkin %s: device already claimed today (9095)", uid)

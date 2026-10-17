@@ -46,7 +46,7 @@ type UsageStore struct {
 }
 
 const (
-	usageMaxEntries  = 2000
+	usageMaxEntries  = 5000 // 低于此前 2000：面板图表需要更长的窗口（约 9 天的调用量）
 	usageMaxFileSize = 8 << 20
 )
 

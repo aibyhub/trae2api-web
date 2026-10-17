@@ -17,18 +17,19 @@ import (
 
 // logMaintenance 最近一次日志清理结果。
 type logMaintenance struct {
-	mu       sync.Mutex
-	at       int64
-	days     int
-	removedU int
-	removedC int
-	errMsg   string
+	mu        sync.Mutex
+	at        int64
+	days      int
+	removedU  int
+	removedC  int
+	removedCr int
+	errMsg    string
 }
 
-func (m *logMaintenance) set(days, removedU, removedC int, errMsg string) {
+func (m *logMaintenance) set(days, removedU, removedC, removedCr int, errMsg string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.at, m.days, m.removedU, m.removedC, m.errMsg = time.Now().Unix(), days, removedU, removedC, errMsg
+	m.at, m.days, m.removedU, m.removedC, m.removedCr, m.errMsg = time.Now().Unix(), days, removedU, removedC, removedCr, errMsg
 }
 
 func (m *logMaintenance) snapshot() map[string]any {
@@ -39,6 +40,7 @@ func (m *logMaintenance) snapshot() map[string]any {
 		"days":            m.days,
 		"removed_usage":   m.removedU,
 		"removed_checkin": m.removedC,
+		"removed_credits": m.removedCr,
 		"error":           m.errMsg,
 	}
 }
@@ -55,14 +57,17 @@ func (h *Handler) logFileInfo(name, path string, entries int, oldest, newest int
 	}
 }
 
-// logFiles 汇总两类日志的概况（checkin 未装配调度器时跳过）。
+// logFiles 汇总日志概况（checkin 未装配调度器时跳过；credits 未启用时 entries=-1 跳过）。
 func (h *Handler) logFiles() []map[string]any {
-	out := make([]map[string]any, 0, 2)
+	out := make([]map[string]any, 0, 3)
 	ue, uo, un := h.usage.Stats()
 	out = append(out, h.logFileInfo("usage.jsonl", h.usage.Path(), ue, uo, un))
 	if h.cfg.Sched != nil {
 		ce, co, cn := h.cfg.Sched.CheckinLogStats()
 		out = append(out, h.logFileInfo("checkin.jsonl", h.cfg.Sched.CheckinLogPath(), ce, co, cn))
+	}
+	if ce, co, cn := h.cfg.Pool.CreditHistoryStats(); ce >= 0 {
+		out = append(out, h.logFileInfo("credits.jsonl", h.cfg.Pool.CreditHistoryPath(), ce, co, cn))
 	}
 	sort.Slice(out, func(i, j int) bool {
 		return out[i]["name"].(string) < out[j]["name"].(string)
@@ -98,22 +103,30 @@ func (h *Handler) adminLogsPrune(w http.ResponseWriter, r *http.Request) {
 	if req.Clear {
 		days = 0
 	}
-	ru, rc, errMsg := h.PruneLogs(days)
+ 	ru, rc, errMsg := h.PruneLogs(days)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": errMsg == "", "removed_usage": ru, "removed_checkin": rc, "error": errMsg,
 		"files": h.logFiles(), "last_prune": h.logs.snapshot(),
 	})
 }
 
-// PruneLogs 按保留期裁剪两类日志，返回删除条数与错误信息。
+// PruneLogs 按保留期裁剪三类日志，返回删除条数与错误信息。
 // keepDays：<0 不动作 / 0 清空 / >0 保留最近 N 天。
 func (h *Handler) PruneLogs(keepDays int) (removedUsage, removedCheckin int, errMsg string) {
 	if keepDays < 0 {
+		h.logs.set(keepDays, 0, 0, 0, "")
 		return 0, 0, ""
 	}
 	ru, _, err := h.usage.Prune(keepDays)
 	if err != nil {
 		errMsg = "usage: " + err.Error()
+	}
+	rCr, _, crErr := h.cfg.Pool.PruneCreditHistory(keepDays)
+	if crErr != nil {
+		if errMsg != "" {
+			errMsg += "; "
+		}
+		errMsg += "credits: " + crErr.Error()
 	}
 	rc := 0
 	if h.cfg.Sched != nil {
@@ -126,7 +139,7 @@ func (h *Handler) PruneLogs(keepDays int) (removedUsage, removedCheckin int, err
 			errMsg += "checkin: " + cerr.Error()
 		}
 	}
-	h.logs.set(keepDays, ru, rc, errMsg)
+	h.logs.set(keepDays, ru, rc, rCr, errMsg)
 	return ru, rc, errMsg
 }
 
