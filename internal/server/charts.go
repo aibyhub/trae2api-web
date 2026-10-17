@@ -5,7 +5,7 @@
 //	         聚合 status ok/error 计数 + 当日按账号成功分布（3k+ 次/天时为一次纯计数扫描）。
 //	credits  积分余额轨迹：data/credits.jsonl 变更点（变更时点的余额即历史余额）+ 当前值，
 //	         附近 7 天签到收益与近 3 天消耗速率（"还能撑几天"）。
-//	expiry   权益包到期日历：pool 快照（expire_at / credits / 分包 limit-used 与到期时刻）。
+//	expiry   权益包到期分布：pool 快照（expire_at / credits / 分包 limit-used 与到期时刻）。
 package server
 
 import (

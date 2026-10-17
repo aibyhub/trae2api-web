@@ -344,6 +344,8 @@ type usageAgg struct {
 	Cost       float64 `json:"cost"`
 	AvgLatency int64   `json:"avg_latency_ms"`
 	MaxLatency int64   `json:"max_latency_ms,omitempty"` // 最慢单笔（上游慢首字节感知）
+	Tps        float64 `json:"tps,omitempty"`            // 输出速率：Σ输出 tokens / Σ耗时秒（沿用 workbuddy 口径）
+	sumMs      int64   // Σ DurationMs（均耗时/均速率基数，不落 JSON）
 	Rate       float64 `json:"rate,omitempty"`
 }
 
@@ -390,6 +392,9 @@ func (h *Handler) adminUsage(w http.ResponseWriter, r *http.Request) {
 		a.Cost = round2(a.Cost)
 		if n > 0 {
 			a.AvgLatency = a.AvgLatency / int64(n)
+		}
+		if a.sumMs > 0 {
+			a.Tps = round2(float64(a.Completion) / (float64(a.sumMs) / 1000))
 		}
 	}
 	finalize(&totals, totals.Requests)
@@ -475,6 +480,7 @@ func aggBump(a *usageAgg, e UsageEntry) {
 	a.CacheRead += e.CacheRead
 	a.Cost += e.Cost
 	a.AvgLatency += e.DurationMs
+	a.sumMs += e.DurationMs
 	if e.DurationMs > a.MaxLatency {
 		a.MaxLatency = e.DurationMs
 	}

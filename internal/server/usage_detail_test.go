@@ -122,7 +122,7 @@ func TestUsagePanelFields(t *testing.T) {
 	now := time.Now()
 	devErr := "code=4027 tool call failed: 400:developer is not one of ['system', 'assistant', 'user', 'tool', 'function'] - 'messages.['0].role'"
 	h.usage.Add(UsageEntry{TS: now.Add(-10 * time.Minute).UnixMilli(), UID: "a", Model: "glm-5.3-flashx",
-		Status: "error", Error: devErr, DurationMs: 45_000})
+		Status: "error", Error: devErr, DurationMs: 45_000, CompletionTokens: 380})
 	// 上一等长窗口（24-48h 前）一条 429：仅计入 prev_totals，不进当前 errs
 	h.usage.Add(UsageEntry{TS: now.Add(-36 * time.Hour).UnixMilli(), UID: "b", Model: "glm-5.2",
 		Status: "error", Error: "软冷却：429 rate limit", DurationMs: 90_000})
@@ -172,12 +172,17 @@ func TestUsagePanelFields(t *testing.T) {
 
 	modelRaw, _ := json.Marshal(d["by_model"])
 	var models []struct {
-		Key    string `json:"key"`
-		MaxLat int64  `json:"max_latency_ms"`
+		Key    string  `json:"key"`
+		MaxLat int64   `json:"max_latency_ms"`
+		Tps    float64 `json:"tps"`
 	}
 	json.Unmarshal(modelRaw, &models)
 	if len(models) != 1 || models[0].Key != "glm-5.3-flashx" || models[0].MaxLat != 45_000 {
 		t.Fatalf("by_model=%s", modelRaw)
+	}
+	// 均速率 = 380 输出 tokens / 45s ≈ 8.44（workbuddy 口径，分母含失败笔耗时）
+	if v := models[0].Tps; v < 8.43 || v > 8.45 {
+		t.Fatalf("tps=%v want ~8.44", v)
 	}
 }
 
