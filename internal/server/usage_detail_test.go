@@ -7,6 +7,8 @@ package server
 import (
 	"encoding/json"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -117,6 +119,33 @@ func itoa(n int64) string {
 }
 
 // 面板新字段行为锁：错误分类、环比上一时段、趋势最慢单笔、按模型 max_latency_ms。
+func TestDetailStoreCapPrune(t *testing.T) {
+	dir := t.TempDir()
+	today := func(off int) string {
+		return "call-details-" + time.Now().AddDate(0, 0, -off).Format("2006-01-02") + ".jsonl"
+	}
+	content := strings.Repeat("x", 600)
+	for _, n := range []string{today(2), today(1), today(0)} {
+		if err := os.WriteFile(filepath.Join(dir, n), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	NewDetailStore(dir, 1_400) // 1.8K 数据 > 1.4K 上限 → 删最老一天
+	if _, err := os.Stat(filepath.Join(dir, today(2))); !os.IsNotExist(err) {
+		t.Fatalf("最老日文件应删除, err=%v", err)
+	}
+	for _, n := range []string{today(1), today(0)} {
+		if _, err := os.Stat(filepath.Join(dir, n)); err != nil {
+			t.Fatalf("当日/次新文件应保留: %v", err)
+		}
+	}
+	// 只剩今日一个文件时即便超限也不删（避免清掉活跃窗口）
+	NewDetailStore(dir, 1)
+	if _, err := os.Stat(filepath.Join(dir, today(0))); err != nil {
+		t.Fatalf("单文件超限不应删除: %v", err)
+	}
+}
+
 func TestUsagePanelFields(t *testing.T) {
 	h := newUsageTestHandler(t)
 	now := time.Now()

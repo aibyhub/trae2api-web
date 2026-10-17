@@ -55,8 +55,10 @@ type Config struct {
 	// AdminPassword 面板登录密码（env TW2A_ADMIN_PASSWORD）；非空时 /admin/api/* 需登录
 	// 或带 Bearer API Key。内置登录页，可替代 Nginx Basic Auth。
 	AdminPassword string
-	// LogRetentionDays 日志保留天数（usage.jsonl / checkin.jsonl）；0 = 关闭自动清理。
+	// LogRetentionDays 日志保留天数；0 = 关闭自动清理。
 	LogRetentionDays int
+	// CallRetentionMB 调用明细目录容量上限（MB）；0 = 不限量。
+	CallRetentionMB int
 	// Prompt 系统提示词策略：Mode "demote"（默认，system 恒定固定提示词 + 调用方
 	// system 降级为对话首条 user 消息）/"replace"（调用方 system 丢弃）/"auto"
 	// （有 system 透传）/ "trae"（合并注入）/ "off"（透传）；
@@ -131,7 +133,7 @@ func NewHandler(cfg Config) *Handler {
 		logins:  map[string]*pendingLogin{},
 		admin:   adminAuth{fails: map[string][]time.Time{}},
 		usage:   NewUsageStore(filepath.Join(cfg.DataDir, "usage.jsonl")),
-		details: NewDetailStore(filepath.Join(cfg.DataDir, "call-details")),
+		details: NewDetailStore(filepath.Join(cfg.DataDir, "call-details"), int64(cfg.CallRetentionMB)*1024*1024),
 		proxies: NewProxyPool(filepath.Join(cfg.DataDir, "proxies.json")),
 	}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))

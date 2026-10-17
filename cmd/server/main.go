@@ -104,6 +104,7 @@ func main() {
 		AdminPassword: cfg.AdminPassword, // 非空 = 面板启用内置登录页
 
 		LogRetentionDays: cfg.LogRetentionDays, // 日志保留天数（0 = 关闭自动清理）
+		CallRetentionMB:  cfg.CallRetentionMB,  // 调用明细容量上限（0 = 不限量）
 	})
 
 	// 启动后异步自检代理池：出口 IP / 延迟 / 状态写回 data/proxies.json，面板直接可见。

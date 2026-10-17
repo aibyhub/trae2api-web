@@ -37,16 +37,19 @@ type DetailStore struct {
 	mu        sync.Mutex
 	dir       string
 	retain    time.Duration
+	cap       int64  // 目录总字节上限；<=0 = 不限量（从最老日期文件开始删）
 	lastPrune string // YYYY-MM-DD，一天只清一次
 }
 
 // detailRetain 明细保留时长（用户要求：最多一个月）。
 const detailRetain = 30 * 24 * time.Hour
 
-// NewDetailStore 构建；启动时清理过期文件。
-func NewDetailStore(dir string) *DetailStore {
-	s := &DetailStore{dir: dir, retain: detailRetain, lastPrune: ""}
-	s.pruneOld(time.Now())
+// NewDetailStore 构建；启动时清理过期文件并按容量封顶（capBytes<=0 = 不限量）。
+func NewDetailStore(dir string, capBytes int64) *DetailStore {
+	s := &DetailStore{dir: dir, retain: detailRetain, cap: capBytes, lastPrune: ""}
+	now := time.Now()
+	s.pruneOld(now)
+	s.pruneByCap(now)
 	return s
 }
 
@@ -61,6 +64,7 @@ func (s *DetailStore) Add(d CallDetail) {
 	now := time.Now()
 	if s.lastPrune != now.Format("2006-01-02") {
 		s.pruneOld(now)
+		s.pruneByCap(now)
 		s.lastPrune = now.Format("2006-01-02")
 	}
 	if err := os.MkdirAll(s.dir, 0o755); err != nil {
@@ -98,6 +102,53 @@ func (s *DetailStore) pruneOld(now time.Time) {
 		dayEnd := t.Add(24 * time.Hour)
 		if dayEnd.Before(cutoff) {
 			_ = os.Remove(filepath.Join(s.dir, name))
+		}
+	}
+}
+
+// pruneByCap 目录总大小超过 cap 时，从最老的日期文件开始删；
+// 当日在写的今天文件永远保留（即便只有它也超限）。
+func (s *DetailStore) pruneByCap(now time.Time) {
+	if s.cap <= 0 {
+		return
+	}
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return
+	}
+	type dayFileRec struct {
+		name string
+		day  string
+		size int64
+	}
+	var files []dayFileRec
+	var total int64
+	today := now.Format("2006-01-02")
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasPrefix(name, "call-details-") || !strings.HasSuffix(name, ".jsonl") {
+			continue
+		}
+		day := strings.TrimSuffix(strings.TrimPrefix(name, "call-details-"), ".jsonl")
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if _, perr := time.ParseInLocation("2006-01-02", day, now.Location()); perr == nil {
+			files = append(files, dayFileRec{name: name, day: day, size: info.Size()})
+			total += info.Size()
+		}
+	}
+	if len(files) <= 1 || total <= s.cap {
+		return
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].day < files[j].day })
+	for _, f := range files {
+		if total <= s.cap || f.day >= today {
+			break
+		}
+		if nerr := os.Remove(filepath.Join(s.dir, f.name)); nerr == nil {
+			total -= f.size
 		}
 	}
 }

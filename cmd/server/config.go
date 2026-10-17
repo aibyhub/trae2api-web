@@ -51,6 +51,9 @@ type Config struct {
 
 	// LogRetentionDays 日志保留天数（usage.jsonl / checkin.jsonl）：默认 90；0 = 不自动清理。
 	LogRetentionDays int `json:"log_retention_days"`
+	// CallRetentionMB 调用明细（data/call-details）容量封顶：默认 1536（1.5GiB）、
+	// 超限时从最老日期文件开始删（当日在写文件除外）；0 = 关闭容量限制。
+	CallRetentionMB int `json:"call_retention_mb"`
 	// CheckinWebhook 签到结果推送地址（企业微信/钉钉/飞书机器人）；空 = 不推送。
 	CheckinWebhook string `json:"checkin_webhook"`
 	// CheckinNotify 推送策略：fail（默认）/ always / never。
@@ -88,6 +91,7 @@ func Default() *Config {
 	c.SanitizeFingerprints = true
 	c.Upstream.TimeoutSeconds = 120
 	c.LogRetentionDays = 90
+	c.CallRetentionMB = 1536
 	c.CheckinNotify = "fail"
 	return c
 }
@@ -194,6 +198,11 @@ func applyEnv(c *Config) {
 			c.LogRetentionDays = n
 		}
 	}
+	if v := os.Getenv("TW2A_CALL_RETENTION_MB"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.CallRetentionMB = n
+		}
+	}
 	if v := os.Getenv("TW2A_CHECKIN_WEBHOOK"); v != "" {
 		c.CheckinWebhook = v
 	}
@@ -226,6 +235,9 @@ func (c *Config) normalize() error {
 	}
 	if c.LogRetentionDays < 0 {
 		c.LogRetentionDays = 0
+	}
+	if c.CallRetentionMB < 0 {
+		c.CallRetentionMB = 0
 	}
 	if c.DefaultModel == "" {
 		c.DefaultModel = "glm-5.2"
