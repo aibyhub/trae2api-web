@@ -63,7 +63,10 @@ func (h *Handler) adminCredits(w http.ResponseWriter, r *http.Request) {
 				ac.Remain, ac.Limit, ac.Used = remain, limit, used
 				ac.Packs = len(packsDetail)
 				ac.PacksDetail = packsDetail
-				h.cfg.Pool.SetExpiry(s.UID, upstream.SoonestExpiry(packsDetail))
+				// 实时查询同时回填池状态：包快照（含最近过期包）即时进面板，
+				// 余额变化时落 credits.jsonl（余额轨迹）+ state.json（SavePacks 落盘见下方）
+				h.cfg.Pool.SetPacks(s.UID, pool.PacksFromEnt(packsDetail))
+				h.cfg.Pool.SetCredits(s.UID, remain)
 			}
 			checkedIn, credits, enable, cerr := h.cfg.Upstream.CheckinStatus(a)
 			if cerr != nil {

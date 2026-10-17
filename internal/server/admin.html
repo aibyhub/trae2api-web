@@ -1120,7 +1120,7 @@ function renderDonut(elId, title, items, labelFn){
 function renderCreditChart(list){
   const el=document.getElementById('chartCredits');
   if(!el) return;
-  const act=(list||[]).filter(x=>x.points && x.points.length>1);
+  const act=(list||[]).filter(x=>x.points && x.points.length>0);
   if(!act.length){ el.innerHTML='<div class="muted" style="padding:14px">暂无余额变更点（credits 随签到/余额刷新产生，v1.4.0 起累积）</div>'; return; }
   const W=780,H=250,L=56,B=26,T=20,R=10, plotH=H-T-B, plotW=W-L-R;
   let minTs=Infinity, maxTs=-Infinity, maxC=0;
@@ -1140,8 +1140,15 @@ function renderCreditChart(list){
   let lx=L;
   act.forEach((ser,i)=>{
     const c=chartPalette[i%chartPalette.length];
-    const pts=ser.points.map(p=>(L+plotW*(p.ts-minTs)/span).toFixed(1)+','+(T+plotH-plotH*p.credits/maxCV).toFixed(1)).join(' ');
-    s += '<polyline points="'+pts+'" fill="none" stroke="'+c+'" stroke-width="2" stroke-linejoin="round"><title>'+esc(ser.uid)+' 当前 '+fmt(ser.current)+(ser.gained_7d?' · 近7天+'+fmt(ser.gained_7d):'')+(ser.burned_3d?' · 近3天-'+fmt(ser.burned_3d):'')+(ser.days_left?' · 撑 '+fmt(ser.days_left)+' 天':'')+'</title></polyline>';
+    const onep=ser.points.length===1;
+    if(onep){
+      const p0=ser.points[0];
+      const cx=(L+plotW*(p0.ts-minTs)/span).toFixed(1), cy=(T+plotH-plotH*p0.credits/maxCV).toFixed(1);
+      s += '<circle cx="'+cx+'" cy="'+cy+'" r="5" fill="'+c+'"><title>'+esc(ser.uid)+' 当前 '+fmt(p0.credits)+'</title></circle>';
+    } else {
+      const pts=ser.points.map(p=>(L+plotW*(p.ts-minTs)/span).toFixed(1)+','+(T+plotH-plotH*p.credits/maxCV).toFixed(1)).join(' ');
+      s += '<polyline points="'+pts+'" fill="none" stroke="'+c+'" stroke-width="2" stroke-linejoin="round"><title>'+esc(ser.uid)+' 当前 '+fmt(ser.current)+(ser.gained_7d?' · 近7天+'+fmt(ser.gained_7d):'')+(ser.burned_3d?' · 近3天-'+fmt(ser.burned_3d):'')+(ser.days_left?' · 撑 '+fmt(ser.days_left)+' 天':'')+'</title></polyline>';
+    }
     let label=uidShort(ser.uid)+' '+fmt(ser.current);
     if(ser.gained_7d) label += ' ·7d+'+fmt(ser.gained_7d);
     if(ser.burned_3d) label += ' ·3d-'+fmt(ser.burned_3d);
@@ -1151,6 +1158,9 @@ function renderCreditChart(list){
     lx += 14+label.length*6.6+16;
   });
   s += '</svg>';
+  if(act.every(x=>x.points.length===1)){
+    s += '<div class="muted" style="padding:0 14px 8px">各账号目前仅 1 个观测点（余额保持不变时不产生新点）；消耗/签到引起余额变化后自动连线。也可打开「额度 · 一键查询」，实时查询会计入余额轨迹。</div>';
+  }
   el.innerHTML = s;
 }
 /* 错误透视：分类聚合（kind 中文映射在前端，方便改词不改协议） */

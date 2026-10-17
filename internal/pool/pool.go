@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"trae2api-web/internal/auth"
+	"trae2api-web/internal/upstream"
 )
 
 // CoolKind 冷却类型。
@@ -339,6 +340,18 @@ func (p *Pool) SetPacks(uid string, packs []PackInfo) {
 	if soonest > 0 || len(packs) == 0 {
 		e.expireAt = soonest
 	}
+}
+
+// PacksFromEnt upstream.EntPack → PackInfo（快照只留展示所需字段；scheduler/管理端共用）。
+func PacksFromEnt(ps []upstream.EntPack) []PackInfo {
+	out := make([]PackInfo, 0, len(ps))
+	for _, p := range ps {
+		out = append(out, PackInfo{
+			Group: p.Group, Name: p.Name,
+			Limit: p.Limit, Used: p.Used, ExpireAt: p.ExpireAt,
+		})
+	}
+	return out
 }
 
 // PacksOf 账号的积分包快照（面板到期日历）；无快照返回 nil。

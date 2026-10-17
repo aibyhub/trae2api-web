@@ -89,8 +89,15 @@ func nextFire(now time.Time, hours []int) time.Time {
 // Run 主循环，阻塞直到 ctx 取消。
 func (s *Scheduler) Run(ctx context.Context) {
 	// 余额/过期数据后台刷新（让「积分先过期优先」路由的数据保持新鲜）。
+	// 启动即回填一次（冷启动后积分轨迹/到期分布立即可用），之后按周期续刷。
 	if s.cfg.BalanceRefresh > 0 {
 		go func() {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			s.refreshBalances()
 			t := time.NewTicker(s.cfg.BalanceRefresh)
 			defer t.Stop()
 			for {
@@ -312,7 +319,7 @@ func (s *Scheduler) checkinUID(uid string, manual bool) Result {
 	if packs, remain, _, _, err := s.cfg.Upstream.EntUsageDetail(a); err != nil {
 		log.Printf("ent-usage %s: %v", uid, err)
 	} else {
-		s.cfg.Pool.SetPacks(uid, packsFromEnt(packs))
+		s.cfg.Pool.SetPacks(uid, pool.PacksFromEnt(packs))
 		s.cfg.Pool.ReenableIfCredits(uid, remain)
 	}
 	s.cfg.Pool.SetCheckin(uid, res.Status)
@@ -325,18 +332,6 @@ func (s *Scheduler) checkinUID(uid string, manual bool) Result {
 
 // RecentCheckins 最近 n 条签到记录（最新在前），供面板「自动签到」看板。
 func (s *Scheduler) RecentCheckins(n int) []CheckinLogEntry { return s.log.Recent(n) }
-
-// packsFromEnt upstream.EntPack → pool.PackInfo（快照只留展示所需字段）。
-func packsFromEnt(ps []upstream.EntPack) []pool.PackInfo {
-	out := make([]pool.PackInfo, 0, len(ps))
-	for _, p := range ps {
-		out = append(out, pool.PackInfo{
-			Group: p.Group, Name: p.Name,
-			Limit: p.Limit, Used: p.Used, ExpireAt: p.ExpireAt,
-		})
-	}
-	return out
-}
 
 // PruneCheckins 按保留期裁剪签到日志（keepDays：<0 不动作 / 0 清空 / >0 保留最近 N 天）。
 func (s *Scheduler) PruneCheckins(keepDays int) (removed, kept int, err error) {
@@ -520,9 +515,12 @@ func (s *Scheduler) refreshBalances() {
 		}
 		packs, remain, _, _, err := s.cfg.Upstream.EntUsageDetail(a)
 		if err != nil {
+			if !errors.Is(err, context.Canceled) {
+				log.Printf("balance refresh %s: ent-usage: %v", st.UID, err)
+			}
 			continue
 		}
-		s.cfg.Pool.SetPacks(st.UID, packsFromEnt(packs))
+		s.cfg.Pool.SetPacks(st.UID, pool.PacksFromEnt(packs))
 		s.cfg.Pool.SetCredits(st.UID, remain)
 	}
 }
