@@ -187,11 +187,13 @@ func truncateStr(s string, n int) string {
 
 // archiveBody 归档用请求体裁剪：逐条消息限制文本长度，保证输出始终是
 // 合法 JSON（面板可直接解析展示）；超限文本以「…(归档截断)」标记。
+// 2026-10-18 收紧：agent 长上下文的逐消息 20KB 放行曾在风暴日把单日文件
+// 推到 510MB（明细均行 ~200KB），改为 6KB/条。
 func archiveBody(body []byte) string {
-	const maxText = 20000
+	const maxText = 6000
 	var obj map[string]any
 	if json.Unmarshal(body, &obj) != nil {
-		return truncateStr(string(body), 512<<10)
+		return truncateStr(string(body), 32<<10)
 	}
 	if msgs, ok := obj["messages"].([]any); ok {
 		for _, mi := range msgs {
@@ -220,10 +222,10 @@ func archiveBody(body []byte) string {
 	}
 	out, err := json.Marshal(obj)
 	if err != nil {
-		return truncateStr(string(body), 512<<10)
+		return truncateStr(string(body), 32<<10)
 	}
-	if len(out) > 512<<10 {
-		return truncateStr(string(out), 512<<10)
+	if len(out) > 48<<10 {
+		return truncateStr(string(out), 48<<10)
 	}
 	return string(out)
 }

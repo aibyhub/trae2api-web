@@ -93,6 +93,10 @@ type Handler struct {
 
 	// logs 数据维护状态（最近一次日志清理）。
 	logs logMaintenance
+
+	// charts 日粒度聚合缓存：call-details 增量摘要（侧车 data/chartdaily/<day>.json）。
+	chartMu    sync.Mutex
+	chartCache map[string]*dailySum
 }
 
 // NewHandler 构建 handler。
@@ -498,15 +502,17 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if respUsage != nil {
 			respUsage = upstream.NormalizeUsage(respUsage)
 		}
+		// 归档字段截断（2026-10-18 收紧）：明细均行曾经 ~200KB、单日 510MB；
+		// 明细演化成「图表数据源」后有全扫暴行风险，正文/推理/系统词改保守上限。
 		h.details.Add(CallDetail{
 			TS:                time.Now().UnixMilli(),
 			UID:               recUID,
 			Model:             configName,
 			UpstreamURL:       h.cfg.Upstream.AgentHost + upstream.EpChat,
 			RequestBody:       archiveBody(upstream.PrepareBody(body)),
-			SystemPrompt:      truncateStr(extractSystemPrompt(body), 32<<10),
-			ResponseContent:   truncateStr(recContent.String(), 256<<10),
-			ResponseReasoning: truncateStr(recReasoning.String(), 256<<10),
+			SystemPrompt:      truncateStr(extractSystemPrompt(body), 8<<10),
+			ResponseContent:   truncateStr(recContent.String(), 16<<10),
+			ResponseReasoning: truncateStr(recReasoning.String(), 6<<10),
 			Usage:             respUsage,
 			Status:            status,
 			Error:             errMsg,
