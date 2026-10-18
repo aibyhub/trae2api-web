@@ -162,6 +162,40 @@ func TestDailySummaryPartialLineHeldBack(t *testing.T) {
 	}
 }
 
+func TestScanDetailChunkSplitsBlocks(t *testing.T) {
+	dir := t.TempDir()
+	h := &Handler{cfg: Config{DataDir: dir}}
+	day := "2026-10-18"
+	rows := make([]string, 0, 60)
+	for i := 0; i < 60; i++ {
+		rows = append(rows, row("u1", "ok", int64(100+i)))
+	}
+	writeDetailDay(t, dir, day, rows...) // ~60 行 ≈ 6KB
+
+	old := scanChunkSize
+	scanChunkSize = 1024 // 强制 1KB 分块 → 必然跨多个块边界
+	defer func() { scanChunkSize = old }()
+
+	got := h.chartDailyCalls()
+	var d dailyCalls
+	for _, x := range got {
+		if x.Date == day {
+			d = x
+		}
+	}
+	if d.OK != 60 || d.MaxMs != 159 {
+		t.Fatalf("block-boundary scan wrong: %+v", d)
+	}
+	s := fetchSummary(t, dir, day)
+	fi, err := os.Stat(filepath.Join(dir, "call-details", "call-details-"+day+".jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Consumed != fi.Size() {
+		t.Fatalf("consumed=%d want filesize=%d", s.Consumed, fi.Size())
+	}
+}
+
 func TestArchiveBodyCaps(t *testing.T) {
 	big := strings.Repeat("x", 99999)
 	body, _ := json.Marshal(map[string]any{"model": "glm-5.2", "messages": []map[string]any{

@@ -77,8 +77,15 @@ func dailySumPath(dataDir, day string) string {
 	return filepath.Join(dataDir, "chartdaily", day+".json")
 }
 
+// scanChunkSize 明细分块读入的块大小；包级变量便于测试注入小分块。
+// 常规 8MB：只要不一次性吞整文件，常驻内存与文件大小无关。
+var scanChunkSize = 8 << 20
+
 // scanDetailChunk 从 offset（行边界对齐）起扫到文件末尾，只解析完整行；
-// 返回新的 consumed 偏移。结尾整行未终结时最后半行留待下一批。
+// 返回新的 consumed 偏移（结尾整行未终结时留待下一批）。
+// 2026-10-19 分块化：此前一次性 make(size-offset) 在首扫 510MB 文件时
+// 直接顶爆容器 256MiB 内存上限（OOM 静默重启）——现按 8MB 块流式吸收，
+// 常驻内存与文件大小无关。
 func scanDetailChunk(f *os.File, offset int64, add func(uid, status string, ms int64)) (int64, error) {
 	fi, err := f.Stat()
 	if err != nil {
@@ -90,28 +97,47 @@ func scanDetailChunk(f *os.File, offset int64, add func(uid, status string, ms i
 	if _, err := f.Seek(offset, io.SeekStart); err != nil {
 		return offset, err
 	}
-	raw := make([]byte, fi.Size()-offset)
-	if _, err := io.ReadFull(f, raw); err != nil {
-		return offset, err
-	}
-	nl := bytes.LastIndexByte(raw, '\n')
-	if nl < 0 {
-		return offset, nil // 无完整行（写入者在打断），等下次增量
-	}
 	var rec struct {
 		UID        string `json:"uid"`
 		Status     string `json:"status"`
 		DurationMs int64  `json:"duration_ms"`
 	}
-	sc := bufio.NewScanner(bytes.NewReader(raw[:nl+1]))
-	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
-	for sc.Scan() {
-		if json.Unmarshal(sc.Bytes(), &rec) != nil {
-			continue
+	rbuf := make([]byte, scanChunkSize)
+	consumed := offset
+	var buf []byte
+	for {
+		n, err := f.Read(rbuf)
+		if n > 0 {
+			buf = append(buf, rbuf[:n]...)
+			start := 0
+			for {
+				idx := bytes.IndexByte(buf[start:], '\n')
+				if idx < 0 {
+					break
+				}
+				line := buf[start : start+idx]
+				start += idx + 1
+				if json.Unmarshal(line, &rec) != nil {
+					continue
+				}
+				add(rec.UID, rec.Status, rec.DurationMs)
+			}
+			if start > 0 {
+				consumed += int64(start)
+				buf = append(buf[:0], buf[start:]...)
+			}
 		}
-		add(rec.UID, rec.Status, rec.DurationMs)
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return consumed, err
+		}
+		if n == 0 {
+			break
+		}
 	}
-	return offset + int64(nl) + 1, nil
+	return consumed, nil // buf 里残余的半行不算入 consumed，等下次增量补齐
 }
 
 func loadDailySumFile(dataDir, day string) *dailySum {
