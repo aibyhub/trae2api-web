@@ -577,6 +577,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 刷新走同一个出口，传输层失败同样不算账号错误。
 				log.Printf("refresh uid=%s: 出口/网络故障（不计账号错误）: %v", acct.UID, shortErr(err))
 				h.cfg.Pool.NoteTransportError(acct.UID, h.cfg.TransportCooldown, "刷新 token 出口故障: "+shortErr(err))
+				// 落一行使用记录（不计成账/不扣零成本）：errs 透视才有「出口/网络故障」可看。
+				record("error", "出口/网络故障（刷新token）: "+shortErr(err))
 			default:
 				h.cfg.Pool.Cooldown(acct.UID, pool.CoolErr, h.cfg.ErrCooldown, "refresh: "+err.Error())
 			}
@@ -595,6 +597,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 本次请求靠 tried 换号继续。
 				log.Printf("chat_stream uid=%s: 出口/网络故障（不计账号错误）: %v", acct.UID, shortErr(terr))
 				h.cfg.Pool.NoteTransportError(acct.UID, h.cfg.TransportCooldown, "出口/网络故障: "+shortErr(terr))
+				// 落一行使用记录：面板 errs 透视才看得到超时/出口风暴（2026-10-18 周日晚高峰实测缺口）。
+				record("error", "出口/网络故障: "+shortErr(terr))
 			} else {
 				h.cfg.Pool.NoteError(acct.UID, h.cfg.ErrThreshold, h.cfg.ErrCooldown)
 			}

@@ -1491,16 +1491,37 @@ async function adminLogout(){
   try{ await fetch('/admin/logout', {method:'POST'}); }catch(e){ /* 忽略 */ }
   location.reload();
 }
-// 会话过期统一兜底：任何面板接口 401 → 弹登录页（登录接口自身的 401 除外）
+// 会话过期统一兜底 + JSON 边界守卫（守卫按 content-type 判定）：
+//   - 任何面板接口 401 → 弹登录页（登录接口自身的 401 除外）；
+//   - 响应不是 JSON（如容器重启空窗时 openresty 的 502 HTML）→ GET 自动重试 2 次，
+//     全败才换成「人话」错误抛出——此前浏览器原话 `Unexpected token '<'` 对用户零信息量；
+//   - 仅 GET 重试（写操作重试可能双触发，只守卫不重试）。
 (function(){
   const _f = window.fetch.bind(window);
   window.fetch = async function(input, init){
-    const r = await _f(input, init);
-    try{
-      const url = String(input && input.url ? input.url : input);
-      if(r.status === 401 && url.indexOf('/admin/login') < 0){ showLoginGate('登录已过期，请重新登录'); }
-    }catch(e){ /* ignore */ }
-    return r;
+    let url0 = '';
+    try{ url0 = String(input && input.url ? input.url : input); }catch(e){ /* ignore */ }
+    const method = String((init && init.method) || (input && input.method) || 'GET').toUpperCase();
+    const attempts = method === 'GET' ? 3 : 1;
+    let r = null, lastMsg = '';
+    for(let i = 0; i < attempts; i++){
+      if(i){ await new Promise(function(res){ setTimeout(res, i === 1 ? 800 : 1600); }); }
+      let unreachable = false;
+      try{ r = await _f(input, init); }
+      catch(e){ unreachable = true; }
+      try{
+        if(r && r.status === 401 && url0.indexOf('/admin/login') < 0){ showLoginGate('登录已过期，请重新登录'); }
+      }catch(e){ /* ignore */ }
+      if(unreachable){ lastMsg = '网络错误：无法连接服务（可能正在重启），已重试 ' + (i + 1) + '/' + attempts; continue; }
+      const ct = ((r.headers || {}).get) ? (r.headers.get('content-type') || '') : '';
+      const isLogin = url0.indexOf('/admin/login') === 0 || url0 === '/admin/logout';
+      if(r.status !== 401 && !isLogin && !/json/i.test(ct)){
+        lastMsg = '服务暂不可达（HTTP ' + r.status + '，非 JSON 响应——大概率正在重启或反代抽风），已重试 ' + (i + 1) + '/' + attempts + '；可稍后切换标签页重试';
+        continue;
+      }
+      return r;
+    }
+    throw new Error(lastMsg);
   };
 })();
 
