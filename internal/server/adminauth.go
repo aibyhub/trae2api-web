@@ -25,10 +25,17 @@ import (
 
 const (
 	adminCookieName = "tw2a_admin"
-	adminSessionTTL = 7 * 24 * time.Hour
 	adminMaxFails   = 10
 	adminFailWindow = 10 * time.Minute
 )
+
+// adminSessionTTL 面板会话有效期：AdminSessionDays 天，<=0 默认 7 天。
+func (h *Handler) adminSessionTTL() time.Duration {
+	if h.cfg.AdminSessionDays > 0 {
+		return time.Duration(h.cfg.AdminSessionDays) * 24 * time.Hour
+	}
+	return 7 * 24 * time.Hour
+}
 
 // adminAuth 登录失败计数（进程内，按来源 IP 简单节流；单管理员面板足够）。
 type adminAuth struct {
@@ -79,7 +86,7 @@ func (h *Handler) adminSecret() []byte {
 
 // issueAdminToken 生成 `exp.hex(hmac)` 形式会话令牌。
 func (h *Handler) issueAdminToken(now time.Time) string {
-	exp := now.Add(adminSessionTTL).Unix()
+	exp := now.Add(h.adminSessionTTL()).Unix()
 	mac := hmac.New(sha256.New, h.adminSecret())
 	fmt.Fprintf(mac, "%d", exp)
 	return strconv.FormatInt(exp, 10) + "." + hex.EncodeToString(mac.Sum(nil))
@@ -188,7 +195,7 @@ func (h *Handler) adminLogin(w http.ResponseWriter, r *http.Request) {
 		Name:     adminCookieName,
 		Value:    h.issueAdminToken(time.Now()),
 		Path:     "/",
-		MaxAge:   int(adminSessionTTL / time.Second),
+		MaxAge:   int(h.adminSessionTTL() / time.Second),
 		HttpOnly: true,
 		Secure:   r.TLS != nil,
 		SameSite: http.SameSiteLaxMode,

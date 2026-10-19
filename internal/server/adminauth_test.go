@@ -2,10 +2,16 @@
 package server
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"trae2api-web/internal/pool"
 )
@@ -82,5 +88,26 @@ func TestAdminBearerAndLegacy(t *testing.T) {
 	}
 	if rec := doReq(legacy, "DELETE", "/admin/api/accounts/x", "", nil); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("legacy write without key = %d want 401", rec.Code)
+	}
+}
+
+// TestAdminSessionTTLConfigurable 会话天数可配：30 天生效、0 走默认 7 天、过期失效。
+func TestAdminSessionTTLConfigurable(t *testing.T) {
+	now := time.Unix(1792000000, 0)
+	h30 := &Handler{cfg: Config{AdminSessionDays: 30}}
+	tok := h30.issueAdminToken(now)
+	want30 := now.Add(30 * 24 * time.Hour).Unix()
+	if !strings.HasPrefix(tok, strconv.FormatInt(want30, 10)+".") {
+		t.Fatalf("token exp prefix = %s want %d", tok, want30)
+	}
+	hDef := &Handler{cfg: Config{}}
+	if defTTL := hDef.adminSessionTTL(); defTTL != 7*24*time.Hour {
+		t.Fatalf("default ttl = %v", defTTL)
+	}
+	expOld := now.Unix() - 3600
+	mac := hmac.New(sha256.New, h30.adminSecret())
+	fmt.Fprintf(mac, "%d", expOld)
+	if h30.adminTokenOK(strconv.FormatInt(expOld, 10) + "." + hex.EncodeToString(mac.Sum(nil))) {
+		t.Fatal("expired token accepted")
 	}
 }

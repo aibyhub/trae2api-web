@@ -55,6 +55,9 @@ type Config struct {
 	// AdminPassword 面板登录密码（env TW2A_ADMIN_PASSWORD）；非空时 /admin/api/* 需登录
 	// 或带 Bearer API Key。内置登录页，可替代 Nginx Basic Auth。
 	AdminPassword string
+	// AdminSessionDays 面板会话有效期（天，env TW2A_ADMIN_SESSION_DAYS）；
+	// <=0 = 默认 7 天。
+	AdminSessionDays int
 	// LogRetentionDays 日志保留天数；0 = 关闭自动清理。
 	LogRetentionDays int
 	// CallRetentionMB 调用明细目录容量上限（MB）；0 = 不限量。

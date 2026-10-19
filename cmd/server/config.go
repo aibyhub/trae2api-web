@@ -13,14 +13,15 @@ import (
 
 // Config 顶层配置。
 type Config struct {
-	Listen        string `json:"listen"`        // ":7864"
-	CallbackPort  string `json:"callback_port"` // "18080"（TRAE 登录回调监听端口，0 = 不起）
-	CallbackBase  string `json:"callback_base"` // 登录回调 base URL（远程部署用，如 http://1.2.3.4:18080）；空 = 127.0.0.1:<port>
-	APIKey        string `json:"-"`             // 只读 env TW2A_API_KEY（不读 json）
-	AdminPassword string `json:"-"`             // 只读 env TW2A_ADMIN_PASSWORD（面板登录密码；空 = 不启用登录页）
-	AuthDir       string `json:"auth_dir"`      // "./auths"
-	StateFile     string `json:"state_file"`    // "./data/state.json"
-	DefaultModel  string `json:"default_model"` // "glm-5.2"
+	Listen           string `json:"listen"`             // ":7864"
+	CallbackPort     string `json:"callback_port"`      // "18080"（TRAE 登录回调监听端口，0 = 不起）
+	CallbackBase     string `json:"callback_base"`      // 登录回调 base URL（远程部署用，如 http://1.2.3.4:18080）；空 = 127.0.0.1:<port>
+	APIKey           string `json:"-"`                  // 只读 env TW2A_API_KEY（不读 json）
+	AdminPassword    string `json:"-"`                  // 只读 env TW2A_ADMIN_PASSWORD（面板登录密码；空 = 不启用登录页）
+	AdminSessionDays int    `json:"admin_session_days"` // env TW2A_ADMIN_SESSION_DAYS（面板会话天数；0 = 默认 7）
+	AuthDir          string `json:"auth_dir"`           // "./auths"
+	StateFile        string `json:"state_file"`         // "./data/state.json"
+	DefaultModel     string `json:"default_model"`      // "glm-5.2"
 
 	Prompt struct {
 		Mode string `json:"prompt_mode"` // "demote" = system 恒定固定提示词 + 调用方 system 降级为对话首条 user（默认）；"replace"/"auto"/"trae"/"off"
@@ -125,6 +126,11 @@ func applyEnv(c *Config) {
 	}
 	if v := os.Getenv("TW2A_ADMIN_PASSWORD"); v != "" {
 		c.AdminPassword = v
+	}
+	if v := os.Getenv("TW2A_ADMIN_SESSION_DAYS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			c.AdminSessionDays = n
+		}
 	}
 	if v := os.Getenv("TW2A_LISTEN"); v != "" {
 		c.Listen = v

@@ -101,7 +101,8 @@ func main() {
 
 		CallbackBase: cfg.CallbackBase, // 空 = 回调仍用 127.0.0.1:<port>
 
-		AdminPassword: cfg.AdminPassword, // 非空 = 面板启用内置登录页
+		AdminPassword:    cfg.AdminPassword, // 非空 = 面板启用内置登录页
+		AdminSessionDays: cfg.AdminSessionDays,
 
 		LogRetentionDays: cfg.LogRetentionDays, // 日志保留天数（0 = 关闭自动清理）
 		CallRetentionMB:  cfg.CallRetentionMB,  // 调用明细容量上限（0 = 不限量）
