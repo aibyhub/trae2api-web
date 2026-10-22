@@ -106,6 +106,8 @@ func main() {
 
 		LogRetentionDays: cfg.LogRetentionDays, // 日志保留天数（0 = 关闭自动清理）
 		CallRetentionMB:  cfg.CallRetentionMB,  // 调用明细容量上限（0 = 不限量）
+
+		StreamIdleTimeout: time.Duration(cfg.Upstream.StreamIdleTimeoutSeconds) * time.Second, // 流内空闲看门狗（默认 120s）
 	})
 
 	// 启动后异步自检代理池：出口 IP / 延迟 / 状态写回 data/proxies.json，面板直接可见。
@@ -115,6 +117,9 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go sch.Run(ctx)
+	// 模型菜单后台唯一自动刷新源：每天一次随机时刻（重启改变偏移）。聊天/面板
+	// 热路径零 IO；面板「立即刷新」按钮是另一条人工路径（/admin/api/models/refresh）。
+	go h.RunModelsRefresher(ctx)
 
 	// 日志保留：启动清理一次 + 每 24h 一次（usage.jsonl / checkin.jsonl）。
 	h.StartLogRetention(ctx)

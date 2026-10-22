@@ -48,6 +48,10 @@ type Config struct {
 
 	Upstream struct {
 		TimeoutSeconds int `json:"timeout_seconds"` // 120
+		// StreamIdleTimeoutSeconds 上游 SSE 流「读空闲看门狗」：连续 N 秒读不到
+		// 任何新字节 → 主动断流按错误终态（2026-10-22：流内冻结实拍 44 分钟）。
+		// 0 = 默认 120；大 context 正常预填 ≤30s 出首事件，不误杀。
+		StreamIdleTimeoutSeconds int `json:"stream_idle_timeout_seconds"`
 	} `json:"upstream"`
 
 	// LogRetentionDays 日志保留天数（usage.jsonl / checkin.jsonl）：默认 90；0 = 不自动清理。
@@ -220,6 +224,11 @@ func applyEnv(c *Config) {
 			c.Upstream.TimeoutSeconds = n
 		}
 	}
+	if v := os.Getenv("TW2A_STREAM_IDLE_SECONDS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			c.Upstream.StreamIdleTimeoutSeconds = n
+		}
+	}
 }
 
 func (c *Config) normalize() error {
@@ -238,6 +247,9 @@ func (c *Config) normalize() error {
 	}
 	if c.Upstream.TimeoutSeconds <= 0 {
 		c.Upstream.TimeoutSeconds = 120
+	}
+	if c.Upstream.StreamIdleTimeoutSeconds <= 0 {
+		c.Upstream.StreamIdleTimeoutSeconds = 120
 	}
 	if c.LogRetentionDays < 0 {
 		c.LogRetentionDays = 0

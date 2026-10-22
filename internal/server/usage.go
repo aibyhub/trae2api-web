@@ -728,7 +728,9 @@ func (h *Handler) adminUsageDetail(w http.ResponseWriter, r *http.Request) {
 // （is_invisible_to_user，如 subagent）与套餐伪模型（free-stack/combo）；
 // 按倍率升序（未知倍率垫底）。
 func (h *Handler) adminRatesGet(w http.ResponseWriter, r *http.Request) {
-	infos := h.fetchDynamicModels()
+	// 只读菜单缓存（零网络 IO）：面板任意刷新页面都不该触发上游拉取；
+	// 菜单更新走「立即刷新」按钮（/admin/api/models/refresh）与每日后台定时。
+	infos := cachedModelInfos()
 	out := make([]map[string]any, 0, len(infos))
 	for _, mi := range infos {
 		// 自定义占位：is_custom_model 标记 + custom_model_ 前缀双保险

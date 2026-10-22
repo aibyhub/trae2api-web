@@ -2,16 +2,19 @@
 package server
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net/http"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"trae2api-web/internal/pool"
@@ -49,6 +52,12 @@ type Config struct {
 	// TransportCooldown 出口/网络故障（代理不可达等）的临时隔离时长，默认 5m。
 	// 这类错误不累计 errCount，只把该出口从选号中短暂摘掉。
 	TransportCooldown time.Duration
+	// StreamIdleTimeout 上游 SSE 流「读空闲看门狗」：连续这么久从上游读不到任何
+	// 新字节 → 主动断掉该条上游连接并按「流内中断」记 error 终态（2026-10-22：
+	// 生产拍到 code=2001 流内挂 44 分钟、空心流最长 1256s——头已到但内容层一层
+	// 不吐，ResponseHeaderTimeout 管不到中段）。大 context 预填正常只需 ≤30s
+	// 出首事件，默认 120s 只切挂死不误杀慢响应；<=0 = 默认 120s。
+	StreamIdleTimeout time.Duration
 	// CallbackBase 登录回调 base URL（远程部署/反代场景，如 http://1.2.3.4:18080）；
 	// 空 = 沿用旧行为 http://127.0.0.1:<port>/authorize。
 	CallbackBase string
@@ -100,6 +109,14 @@ type Handler struct {
 	// charts 日粒度聚合缓存：call-details 增量摘要（侧车 data/chartdaily/<day>.json）。
 	chartMu    sync.Mutex
 	chartCache map[string]*dailySum
+
+	// 模型级挂死熔断（fast-fail，2026-10-22 事故复盘）：同一模型窗内 N 次「出口/
+	// 网络故障」（上游 chat 管道黑溺、缓冲不吐首字节）→ 熔断保持期内该模型请求
+	// 立即 503，不再让客户端干等 2~4 分钟的 transport 超时（上游问题，账号轮换
+	// 无解；换模型即可恢复，提示词放错误消息）。成功一次即清零观察窗。
+	hangMu    sync.Mutex
+	hangHits  map[string][]time.Time // 按 config_name 记录出口故障时刻序列
+	hangUntil map[string]time.Time   // 熔断持有期截止（零值=不熔断）
 }
 
 // NewHandler 构建 handler。
@@ -128,6 +145,9 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.TransportCooldown <= 0 {
 		cfg.TransportCooldown = 5 * time.Minute
 	}
+	if cfg.StreamIdleTimeout <= 0 {
+		cfg.StreamIdleTimeout = 2 * time.Minute // 流内空闲看门狗默认 120s（不误杀大 context 预填 ≤30s 的正常首事件）
+	}
 	if cfg.DataDir == "" {
 		cfg.DataDir = "data"
 	}
@@ -135,13 +155,15 @@ func NewHandler(cfg Config) *Handler {
 		cfg.Prompt.Mode = "auto"
 	}
 	h := &Handler{
-		cfg:     cfg,
-		mux:     http.NewServeMux(),
-		logins:  map[string]*pendingLogin{},
-		admin:   adminAuth{fails: map[string][]time.Time{}},
-		usage:   NewUsageStore(filepath.Join(cfg.DataDir, "usage.jsonl")),
-		details: NewDetailStore(filepath.Join(cfg.DataDir, "call-details"), int64(cfg.CallRetentionMB)*1024*1024),
-		proxies: NewProxyPool(filepath.Join(cfg.DataDir, "proxies.json")),
+		cfg:       cfg,
+		mux:       http.NewServeMux(),
+		logins:    map[string]*pendingLogin{},
+		admin:     adminAuth{fails: map[string][]time.Time{}},
+		hangHits:  map[string][]time.Time{},
+		hangUntil: map[string]time.Time{},
+		usage:     NewUsageStore(filepath.Join(cfg.DataDir, "usage.jsonl")),
+		details:   NewDetailStore(filepath.Join(cfg.DataDir, "call-details"), int64(cfg.CallRetentionMB)*1024*1024),
+		proxies:   NewProxyPool(filepath.Join(cfg.DataDir, "proxies.json")),
 	}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
@@ -185,6 +207,9 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("GET /admin/api/usage/detail", h.withAdminAuth(h.adminUsageDetail))
 	h.mux.HandleFunc("GET /admin/api/charts", h.adminCharts)
 	h.mux.HandleFunc("GET /admin/api/rates", h.adminRatesGet)
+	// 模型菜单手动刷新（2026-10-22 口径：菜单自动刷新 = 每天一次随机时刻；
+	// 面板按钮是唯一即时刷新路径）。
+	h.mux.HandleFunc("POST /admin/api/models/refresh", h.withAdminAuth(h.adminModelsRefresh))
 	h.mux.HandleFunc("GET /admin/api/proxies", h.withAdminAuth(h.adminProxiesGet))
 	h.mux.HandleFunc("POST /admin/api/proxies", h.withAdminAuth(h.adminProxiesAdd))
 	h.mux.HandleFunc("POST /admin/api/proxies/bulk", h.withAdminAuth(h.adminProxiesAddBulk))
@@ -293,9 +318,16 @@ func normalizeModelName(s string) string {
 	return strings.Join(parts, "-")
 }
 
+// namespace 内部名 → config_name 归一化映射（下划线 → 横线）。
+
 // knownModel 判断 model 是否在动态/静态模型表中。
+//
+// 禁止任何网络 IO：菜单拉取已移入后台定时任务（RunModelsRefresher）与
+// /v1/models 的异步过期触发。聊天热路径只读内存，1.5.9（2026-10-22 事故复盘）：
+// 此前每 1h TTL 过期后的首个聊天请求会同步拉一次菜单，出口抖动时全体卡
+// ~10 秒、失败还临时回退静态表（缺 glm 家族别名）→ 秒回 400 unknown model。
 func (h *Handler) knownModel(model string) bool {
-	for _, m := range h.modelList() {
+	for _, m := range h.acceptListNoFetch() {
 		if m["id"] == model {
 			return true
 		}
@@ -304,6 +336,12 @@ func (h *Handler) knownModel(model string) bool {
 }
 
 // 静态 SOLO 模型表（SPEC P3：32 个 config_name，来自逆向报告；动态拉取失败时回退）。
+//
+// 2026-10-22 追加：OpenAI 风格别名 5 条（ll 上 ch18 渠道投放的稳定名单）。
+// 上游 SOLO 接受这些：历史 roster 长期成员；冷启动/菜单空时兜底表若缺它们，
+// glm/mimo/deepseek 系请求会被 mapModel 秒拒（unknow model）——1.5.8 事故
+// （出口抖动窗口）就是静态兜底表缺名造成的。别名最终是否可用仍由上游裁决，
+// 这里只决定「要不要把请求送出去」。
 var staticModels = []map[string]any{
 	{"id": "Doubao-Seed-2.1-Pro", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
 	{"id": "seed-code-pro-0430", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
@@ -337,31 +375,47 @@ var staticModels = []map[string]any{
 	{"id": "explore_sub_agent_v13", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
 	{"id": "explore_sub_agent_v2", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
 	{"id": "summary", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
+	// ---- OpenAI 风格别名（2026-10-22 追加，ll 生产在投名单）----
+	{"id": "glm-5.3-flash", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
+	{"id": "glm-5.3-flashx", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
+	{"id": "deepseek-v4.1-flash", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
+	{"id": "mimo-v2.6-pro", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
+	{"id": "mimo-v2.6-flash", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
 }
 
-// dynamicModelsCache 动态模型缓存（成功 1h / 失败负缓存 5min）。
+// dynamicModelsCache 动态模型菜单缓存（2026-10-22 口径改版）：
+//
+// 聊天热路径、/v1/models、/admin/api/rates 一律**只读本缓存**（零网络 IO）。菜单
+// 的刷新来源只有两个：
+//   - 每天一次随机时刻的后台拉取（RunModelsRefresher，24h 一次 + 启动随机偏移）；
+//   - 面板「立即刷新」按钮（POST /admin/api/models/refresh）。
+//
+// 拉取失败**不清缓存**（继续用旧菜单兜服务，stale-can-serve）；仅冷启动（缓存为
+// 空）时回落 staticModels 静态兜底表。1.5.8 的旧口径（每 1h TTL 过期后由聊天/
+// 菜单热路径同步拉取、失败回退静态表）在出口抖动时会让全体请求卡 ~10s，且静态
+// 表不含 glm 家族别名 → 秒回 400 unknown model，2026-10-22 生产确实如此。
 var dynamicModelsCache struct {
 	sync.RWMutex
-	ids      []upstream.ModelInfo
-	fetched  time.Time
-	lastFail time.Time
+	ids     []upstream.ModelInfo
+	fetched time.Time
 }
 
-const (
-	dynamicModelsTTL        = time.Hour
-	modelsFetchFailCooldown = 5 * time.Minute
-)
+const modelsFetchFailCooldown = 5 * time.Minute // 失败后的最小重试间隔（防手动/定时风暴中的重试洪水）
 
-func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
-		"object": "list",
-		"data":   h.modelList(),
-	})
+var modelsRefreshInFlight atomic.Bool // 同一时刻至多一次菜单拉取在飞（防双击/定时叠加）
+
+// cachedModelInfos 读缓存里的动态菜单（只读，无 IO）。
+func cachedModelInfos() []upstream.ModelInfo {
+	dynamicModelsCache.RLock()
+	out := dynamicModelsCache.ids
+	dynamicModelsCache.RUnlock()
+	return out
 }
 
-// modelList 动态获取模型列表并包装成 OpenAI 格式；失败回退静态表。
-func (h *Handler) modelList() []map[string]any {
-	if infos := h.fetchDynamicModels(); len(infos) > 0 {
+// acceptListNoFetch 当前可接受模型（OpenAI 格式）：缓存菜单优先；冷启动缓存为空
+// → staticModels 静态兜底（含 glm 家族 OpenAI 别名，见该表头注释）。
+func (h *Handler) acceptListNoFetch() []map[string]any {
+	if infos := cachedModelInfos(); len(infos) > 0 {
 		out := make([]map[string]any, 0, len(infos))
 		for _, mi := range infos {
 			entry := map[string]any{
@@ -381,43 +435,80 @@ func (h *Handler) modelList() []map[string]any {
 	return staticModels
 }
 
-// fetchDynamicModels 从池中任一健康账号拉模型列表（get_detail_param），缓存 1h。
-func (h *Handler) fetchDynamicModels() []upstream.ModelInfo {
-	dynamicModelsCache.RLock()
-	if len(dynamicModelsCache.ids) > 0 && time.Since(dynamicModelsCache.fetched) < dynamicModelsTTL {
-		out := dynamicModelsCache.ids
-		dynamicModelsCache.RUnlock()
-		return out
-	}
-	if !dynamicModelsCache.lastFail.IsZero() && time.Since(dynamicModelsCache.lastFail) < modelsFetchFailCooldown {
-		dynamicModelsCache.RUnlock()
-		return nil
-	}
-	dynamicModelsCache.RUnlock()
+func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"object": "list",
+		"data":   h.acceptListNoFetch(),
+	})
+}
 
+// refreshModelMenu 同步拉一次菜单（get_detail_param）：成功 → 缓存更新（打 id
+// 增删日志，运维可见上游 roster 变化）；失败 → 返回错误，缓存原样保留。
+// 调用方只有两类：每天一次的后台定时（RunModelsRefresher 的 asyncRefreshMenu）
+// 与面板手动刷新（adminModelsRefresh）。聊天路径永不到这里。
+func (h *Handler) refreshModelMenu() (int, error) {
 	acct := h.cfg.Pool.Pick()
 	if acct == nil {
-		return nil
+		return 0, fmt.Errorf("no healthy account to fetch the model menu")
 	}
 	infos, err := h.cfg.Upstream.FetchModels(acct)
-	if err != nil || len(infos) == 0 {
-		dynamicModelsCache.Lock()
-		dynamicModelsCache.lastFail = time.Now()
-		dynamicModelsCache.Unlock()
-		return nil
+	if err != nil {
+		return 0, fmt.Errorf("fetch models: %w", err)
+	}
+	if len(infos) == 0 {
+		return 0, fmt.Errorf("fetch models: empty roster from upstream")
 	}
 	dynamicModelsCache.Lock()
+	old := dynamicModelsCache.ids
 	dynamicModelsCache.ids = infos
 	dynamicModelsCache.fetched = time.Now()
-	dynamicModelsCache.lastFail = time.Time{}
 	dynamicModelsCache.Unlock()
-	return infos
+	if len(infos) != len(old) {
+		log.Printf("models menu refreshed: %d model(s) (was %d)", len(infos), len(old))
+	} else {
+		log.Printf("models menu refreshed: %d model(s)", len(infos))
+	}
+	return len(infos), nil
+}
+
+// asyncRefreshMenu 异步拉一次（并发上限 1，失败不炸不刷屏，仅一行日志）。
+func (h *Handler) asyncRefreshMenu() {
+	if !modelsRefreshInFlight.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer modelsRefreshInFlight.Store(false)
+		if _, err := h.refreshModelMenu(); err != nil {
+			log.Printf("models menu refresh failed (keep serving stale menu): %v", err)
+		}
+	}()
+}
+
+// RunModelsRefresher 菜单后台唯一自动刷新源：首次 = 启动后随机偏移 (0..24h)，
+// 之后每 24h 一次——「每天最多一次、时刻随机」的口径（2026-10-22 定稿）。
+// 面板「立即刷新」按钮是另一条人工路径；聊天热路径零 IO 由此架构保证。
+func (h *Handler) RunModelsRefresher(ctx context.Context) {
+	jitter := time.Duration(rand.Int63n(int64(24 * time.Hour)))
+	log.Printf("models menu refresher: first pull in %v, then every 24h", jitter.Round(time.Minute))
+	timer := time.NewTimer(jitter)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			h.asyncRefreshMenu()
+			timer.Reset(24 * time.Hour)
+		}
+	}
 }
 
 // modelRate 返回模型的官方消耗倍率（get_detail_param 的 consumption_rate）；
-// 上游未下发（0）或模型未知时返回 1。查不到会尝试刷新一次模型缓存。
+// 上游未下发（0）或模型未知时返回 1。只读菜单缓存（零网络 IO；菜单由后台定时
+// /面板手动刷新维护）。旧口径的「查不到就现拉一次」在聊天热路径上会卡请求，
+// 已随 1.5.9 菜单架构改版移除。
 func (h *Handler) modelRate(model string) float64 {
-	for _, mi := range h.fetchDynamicModels() {
+	for _, mi := range cachedModelInfos() {
 		if mi.ID == model {
 			if mi.Rate > 0 {
 				return mi.Rate
@@ -465,6 +556,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	configName, err := h.mapModel(peek.Model)
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	// 模型级挂死熔断（fast-fail）：该模型最近反复「出口故障/上游黑溺」时，
+	// 直接 503 让调用方秒切模型/渠道，不再陪上游黑洞干等 2~4 分钟 transport 超时。
+	if h.hangBlocked(configName) {
+		log.Printf("chat fast-fail: %s in hang hold", configName)
+		writeOpenAIError(w, http.StatusServiceUnavailable, "model_temporarily_down",
+			"model "+configName+" is currently unstable upstream (repeated stalls); retry later or switch model")
 		return
 	}
 	body = setModelInBody(body, configName)
@@ -525,6 +624,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	tried := map[string]bool{}
 	var lastErr error
+	var hangNoted bool // 本请求是否已给模型挂死观察窗记过一笔（双账号同轮失败只计一次）
 
 	// 流式请求：先把 SSE 头 + 首个心跳注释发给客户端，再进轮换。
 	// 之后上游首字节慢（120s 头等待悬挂）时客户端已拿 200 且线上有心跳流动，
@@ -608,6 +708,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				h.cfg.Pool.NoteTransportError(acct.UID, h.cfg.TransportCooldown, "出口/网络故障: "+shortErr(terr))
 				// 落一行使用记录：面板 errs 透视才看得到超时/出口风暴（2026-10-18 周日晚高峰实测缺口）。
 				record("error", "出口/网络故障: "+shortErr(terr))
+				// 模型级挂死观察窗：每请求记一笔（传输故障按请求去重，避免双账号
+				// 同轮双计；账号轮换对「上游管道黑溺」无解，跨请求累计到阈值即熔断）。
+				if !hangNoted {
+					hangNoted = true
+					h.noteModelHang(configName)
+				}
 			} else {
 				h.cfg.Pool.NoteError(acct.UID, h.cfg.ErrThreshold, h.cfg.ErrCooldown)
 			}
@@ -639,12 +745,20 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 		}
+		// 上游流内「读空闲看门狗」：大 context / 后端劣化会进入头已到、SSE 无事件的
+		// 冻结态（生产实测 code=2001 挂 44 分钟、空心流 1256s）。120s 无字节即断流
+		// 记 error，不给它挂到天荒地老（正常长响应逐字节重置计时，不受影响）。
+		var idleW *idleWatchReader
+		if h.cfg.StreamIdleTimeout > 0 {
+			idleW = newIdleWatchReader(rc, h.cfg.StreamIdleTimeout)
+			rc = idleW
+		}
 		if peek.Stream {
 			h.cfg.Pool.NoteSuccess(acct.UID)
 			// 流内业务错误（1005 plan/5xx 等）→ 冷却账号，错误信息注入 SSE。
 			// sw（互斥包装）同时被心跳 goroutine 使用，避免与 chunk 写交错。
 			var streamErrMsg string
-			_ = upstream.StreamWithHooks(sw, rc, configName, func(se *upstream.SOLOStreamError) {
+			streamErr := upstream.StreamWithHooks(sw, rc, configName, func(se *upstream.SOLOStreamError) {
 				h.handleStreamError(acct.UID, se)
 				streamErrMsg = fmt.Sprintf("code=%d %s", se.Code, se.Msg)
 			}, func(m map[string]any) { recUsage = m }, func(delta map[string]any) {
@@ -656,16 +770,36 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				}
 			})
 			rc.Close()
+			// 流读取中断要落账并给终态（此前 err 被丢弃：上游冻结/断连会静默记成
+			// "ok" + 0 token——「空心流」假阳性，正是 2026-10-22 复盘的实证之一）。
+			switch {
+			case idleW != nil && idleW.Killed() && streamErr != nil:
+				streamErrMsg = fmt.Sprintf("上游流内冻结（%v 无新事件，看门狗断流）: %v", h.cfg.StreamIdleTimeout, shortErr(streamErr))
+			case streamErr != nil:
+				streamErrMsg = "上游流中断: " + shortErr(streamErr)
+			}
 			if streamErrMsg != "" {
 				record("error", streamErrMsg)
+				if sw != nil {
+					// 流头已提交：终态以流内 error 事件 + [DONE] 收尾（客户端可见失败）。
+					writeSSETerminalError(sw, streamErrMsg)
+				}
 			} else {
 				record("ok", "")
 			}
+			h.noteModelOK(configName)
 			return
 		}
 		resp, err := upstream.Aggregate(rc, configName)
 		rc.Close() // 已完全消费，立即释放上游连接（防轮转 continue 泄漏 body）
 		if err != nil {
+			// 看门狗断流（非流式大响应中途冻结）→ 视作出口故障：换号重试不受
+			// 「业务流错误不轮换」限制，且不累计账号错误。
+			if idleW != nil && idleW.Killed() {
+				lastErr = fmt.Errorf("上游流内冻结（看门狗断流，%v 无新数据）", h.cfg.StreamIdleTimeout)
+				h.cfg.Pool.NoteTransportError(acct.UID, h.cfg.TransportCooldown, "上游流内冻结: "+shortErr(lastErr))
+				continue
+			}
 			// 流内业务错误（如 1005 plan 权益不足）→ 冷却账号并轮转下一账号。
 			var se *upstream.SOLOStreamError
 			if errors.As(err, &se) {
@@ -699,6 +833,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		record("ok", "")
+		h.noteModelOK(configName)
 		writeJSON(w, http.StatusOK, resp)
 		return
 	}
@@ -713,6 +848,85 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeOpenAIError(w, http.StatusServiceUnavailable, "no_healthy_account", msg)
+}
+
+const (
+	hangWindow    = 10 * time.Minute // 出口故障计窗
+	hangThreshold = 2                // 窗内两笔**独立请求**都挂死 → 熔断（单次抖动不熔断，下一笔成功即清零）
+	hangHold      = 5 * time.Minute  // 熔断保持时长（到期自动放行试恢复）
+)
+
+// noteModelHang 该模型发生一笔出口/网络故障（每请求至多记一笔）。窗内达到阈值 →
+// 熔断保持期开启（后续该模型请求入口快速失败，不再陪上游黑洞干等 transport 超时）。
+func (h *Handler) noteModelHang(model string) {
+	h.hangMu.Lock()
+	defer h.hangMu.Unlock()
+	now := time.Now()
+	hits := h.hangHits[model][:0]
+	for _, t := range h.hangHits[model] {
+		if now.Sub(t) < hangWindow {
+			hits = append(hits, t)
+		}
+	}
+	hits = append(hits, now)
+	h.hangHits[model] = hits
+	if len(hits) >= hangThreshold {
+		h.hangUntil[model] = now.Add(hangHold)
+		if len(hits) == hangThreshold { // 只在跨阈值瞬打一行，保持期内不刷屏
+			log.Printf("chat hang guard: %s fast-fail engaged for %v (%d upstream stalls within %v)",
+				model, hangHold, len(hits), hangWindow)
+		}
+	}
+}
+
+// noteModelOK 模型成功一笔 → 清观察窗与熔断（恢复信号）。
+func (h *Handler) noteModelOK(model string) {
+	h.hangMu.Lock()
+	defer h.hangMu.Unlock()
+	delete(h.hangHits, model)
+	delete(h.hangUntil, model)
+}
+
+// hangBlocked 该模型是否处于挂死熔断保持期。
+func (h *Handler) hangBlocked(model string) bool {
+	h.hangMu.Lock()
+	defer h.hangMu.Unlock()
+	until, ok := h.hangUntil[model]
+	return ok && !until.IsZero() && time.Now().Before(until)
+}
+
+// adminModelsRefresh POST /admin/api/models/refresh：面板「立即刷新」按钮。
+// 同步拉一次菜单；并发已在飞 → 202 busy（前台秒回，不打断正在进行的拉取）。
+func (h *Handler) adminModelsRefresh(w http.ResponseWriter, r *http.Request) {
+	if !modelsRefreshInFlight.CompareAndSwap(false, true) {
+		writeJSON(w, http.StatusAccepted, map[string]any{"status": "busy", "message": "menu refresh already in progress"})
+		return
+	}
+	defer modelsRefreshInFlight.Store(false)
+	n, err := h.refreshModelMenu()
+	if err != nil {
+		log.Printf("admin models refresh failed (keep serving stale menu): %v", err)
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"status":  "error",
+			"message": "菜单拉取失败（原菜单继续生效）: " + err.Error(),
+			"count":   len(cachedModelInfos()),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":      "ok",
+		"count":       n,
+		"fetched_at":  time.Now().Format(time.RFC3339),
+		"menu_source": menuSourceLabel(),
+	})
+}
+
+// menuSourceLabel 当前菜单来源：dynamic（后台/手动拉取过）或 static（冷启动兜底）。
+func menuSourceLabel() string {
+	if len(cachedModelInfos()) > 0 {
+		return "dynamic"
+	}
+	return "static"
 }
 
 // handleStreamError 流式响应中的上游业务错误 → pool 冷却状态机。

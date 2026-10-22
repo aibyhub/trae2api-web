@@ -310,7 +310,11 @@
   <!-- 官方倍率 -->
   <div id="pane-rates" class="pane">
     <div class="panel">
-      <span class="muted">只列 <b>TRAE 自带模型</b>（自定义占位与内部 subagent 已剔除），倍率由上游定义（get_detail_param → consumption_rate）、随上游实时更新，按倍率<b>升序</b>。使用记录的「消耗」= tokens × 官方倍率。</span>
+      <span class="muted">只列 <b>TRAE 自带模型</b>（自定义占位与内部 subagent 已剔除），倍率由上游定义（get_detail_param → consumption_rate），按倍率<b>升序</b>。使用记录的「消耗」= tokens × 官方倍率。菜单由后台<b>每天一次随机时刻</b>自动更新；聊天路径不拉取（零 IO），要立即更新就点下面按钮。</span>
+    </div>
+    <div class="panel imp-row" style="align-items:center">
+      <button id="menuRefreshBtn" class="btn primary" onclick="refreshModelsMenu()">立即刷新菜单</button>
+      <span id="menuRefreshStatus" class="muted"></span>
     </div>
     <div id="ratesTable" class="tblwrap"><div class="muted" style="padding:14px"><span class="spin"></span> 加载中...</div></div>
   </div>
@@ -953,6 +957,22 @@ async function loadRates(){
   }catch(e){
     document.getElementById('ratesTable').innerHTML = '<div style="color:var(--bad);padding:14px">加载失败：'+esc(e.message)+'</div>';
   }
+}
+
+/* 手动刷新模型菜单（POST /admin/api/models/refresh）：成功后重拉倍率表 */
+async function refreshModelsMenu(){
+  const btn = document.getElementById('menuRefreshBtn');
+  const st  = document.getElementById('menuRefreshStatus');
+  btn.disabled = true;
+  st.textContent = '正在从上游拉取…';
+  try{
+    const r = await fetch('/admin/api/models/refresh', {method:'POST', headers: authHeader()});
+    const d = await r.json();
+    if(r.ok){ st.textContent = '已更新：'+d.count+' 个模型（'+new Date(d.fetched_at).toLocaleString()+'，来源 '+d.menu_source+'）'; loadRates(); }
+    else { st.textContent = '失败：'+esc(d.message||('HTTP '+r.status))+'（原菜单继续生效）'; }
+  }catch(e){
+    st.textContent = '失败：'+esc(e.message)+'（原菜单继续生效）';
+  }finally{ btn.disabled = false; }
 }
 function renderRates(models){
   const el = document.getElementById('ratesTable');

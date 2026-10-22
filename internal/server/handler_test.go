@@ -229,17 +229,25 @@ func TestModelsEndpoint(t *testing.T) {
 		t.Errorf("object=%v", resp["object"])
 	}
 	data := resp["data"].([]any)
-	if len(data) != 32 {
-		t.Errorf("models count=%d want 32", len(data))
+	// 静态兜底表 = 32 个 config_name + 5 条 OpenAI 风格别名（2026-10-22 追加）。
+	if len(data) != 37 {
+		t.Errorf("models count=%d want 37", len(data))
 	}
 	found := false
+	aliasFound := false
 	for _, m := range data {
 		if m.(map[string]any)["id"] == "glm-5.2" {
 			found = true
 		}
+		if m.(map[string]any)["id"] == "glm-5.3-flash" {
+			aliasFound = true
+		}
 	}
 	if !found {
 		t.Error("glm-5.2 missing")
+	}
+	if !aliasFound {
+		t.Error("glm-5.3-flash alias missing from static fallback")
 	}
 }
 
