@@ -63,6 +63,14 @@ func (a *Auth) RefreshTokenValue() string {
 	return a.RefreshToken
 }
 
+// ExpiresAtValue 返回当前过期时刻的读锁快照（面板/汇总读路径用，
+// 防与 RefreshToken 写并发竞争——包外禁止裸读字段，2026-10-25 修复）。
+func (a *Auth) ExpiresAtValue() int64 {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.ExpiresAt
+}
+
 // NeedsRefresh 报告 token 是否将在 within 内过期（或已过期/无 expiry）。
 func (a *Auth) NeedsRefresh(within time.Duration) bool {
 	a.mu.RLock()
@@ -82,17 +90,17 @@ func (a *Auth) NeedsRefreshLocked(within time.Duration) bool {
 //
 //	{"account":{...},"auth":{...}}
 func parseNested(raw []byte) (*Auth, error) {
-		var n struct {
-			Auth struct {
-				AccessToken  string `json:"accessToken"`
-				RefreshToken string `json:"refreshToken"`
-				ExpiresAt    int64  `json:"expiresAt"`
-				Domain       string `json:"domain"`
-				ApiHost      string `json:"apiHost"`
-				MachineID    string `json:"machineId"`
-				DeviceID     string `json:"deviceId"`
-				ProxyURL     string `json:"proxyUrl"`
-			} `json:"auth"`
+	var n struct {
+		Auth struct {
+			AccessToken  string `json:"accessToken"`
+			RefreshToken string `json:"refreshToken"`
+			ExpiresAt    int64  `json:"expiresAt"`
+			Domain       string `json:"domain"`
+			ApiHost      string `json:"apiHost"`
+			MachineID    string `json:"machineId"`
+			DeviceID     string `json:"deviceId"`
+			ProxyURL     string `json:"proxyUrl"`
+		} `json:"auth"`
 		Account struct {
 			UID          string `json:"uid"`
 			EnterpriseID string `json:"enterpriseId"`

@@ -170,16 +170,18 @@ func TestBuildLoginURL(t *testing.T) {
 	q := parsed.Query()
 	// 核心参数齐全
 	checks := map[string]string{
-		"client_id":         "en1oxy7wnw8j9n",
-		"auth_from":         "solo",
-		"login_channel":     "native_ide",
-		"auth_type":         "local",
-		"machine_id":        machineID,
-		"device_id":         deviceID,
-		"x_machine_id":      machineID,
-		"x_device_id":       deviceID,
-		"x_device_brand":    "PC",
-		"x_device_type":     "PC",
+		"client_id":     "en1oxy7wnw8j9n",
+		"auth_from":     "solo",
+		"login_channel": "native_ide",
+		"auth_type":     "local",
+		"machine_id":    machineID,
+		"device_id":     deviceID,
+		"x_machine_id":  machineID,
+		"x_device_id":   deviceID,
+		// 2026-10-25 真机口径：brand=机型标识，type=OS 名，os_version=系统版本。
+		"x_device_brand":    upstream.DeviceBrand,
+		"x_device_type":     upstream.DeviceOSName,
+		"x_os_version":      upstream.OSVersion,
 		"auth_callback_url": cb,
 		// 2026-10 真机 1.107.1 对齐：plugin_version 取 tronBuildVersion，
 		// PKCE S256 参数与 hide_saas_login 固定追加。

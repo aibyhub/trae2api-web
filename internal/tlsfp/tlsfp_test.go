@@ -98,16 +98,20 @@ func parseHelloBytes(t *testing.T, buf []byte) helloInfo {
 	}
 	ch := hs[4:]
 	p := 2 + 32
-	sidLen := int(ch[p]); p += 1 + sidLen
-	csLen := int(binary.BigEndian.Uint16(ch[p : p+2])); p += 2
+	sidLen := int(ch[p])
+	p += 1 + sidLen
+	csLen := int(binary.BigEndian.Uint16(ch[p : p+2]))
+	p += 2
 	var ciphers []string
 	for i := 0; i < csLen; i += 2 {
 		c := binary.BigEndian.Uint16(ch[p+i : p+i+2])
 		ciphers = append(ciphers, strconv.Itoa(int(c)))
 	}
 	p += csLen
-	compLen := int(ch[p]); p += 1 + compLen
-	extLen := int(binary.BigEndian.Uint16(ch[p : p+2])); p += 2
+	compLen := int(ch[p])
+	p += 1 + compLen
+	extLen := int(binary.BigEndian.Uint16(ch[p : p+2]))
+	p += 2
 	end := p + extLen
 	info := helloInfo{ciphers: ciphers}
 	for p+4 <= end {

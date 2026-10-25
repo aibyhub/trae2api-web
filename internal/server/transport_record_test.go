@@ -34,8 +34,7 @@ func TestTransportErrorRecordsUsageRow(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
-	var es []UsageEntry
-	es = h.usage.Since(0)
+	es := h.usage.Since(0)
 	if len(es) == 0 {
 		t.Fatal("transport fault left zero usage rows")
 	}

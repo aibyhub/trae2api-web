@@ -1,7 +1,8 @@
-﻿package upstream
+package upstream
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -210,7 +211,7 @@ func TestChatStreamSendsHeadersAndRewritesBody(t *testing.T) {
 		}, nil
 	})
 	a := &auth.Auth{AccessToken: "at", UID: "u1", MachineID: "m1", DeviceID: "d1"}
-	rc, status, respBody, err := c.ChatStream(a, []byte(`{"model":"glm-5.2","messages":[]}`))
+	rc, status, respBody, err := c.ChatStream(context.Background(), a, []byte(`{"model":"glm-5.2","messages":[]}`))
 	if err != nil || status != 200 {
 		t.Fatalf("chat: status=%d err=%v", status, err)
 	}
@@ -239,7 +240,7 @@ func TestChatStreamUsesDedicatedStreamClient(t *testing.T) {
 		}, nil
 	})
 	c.StreamHTTP = &http.Client{Transport: c.HTTP.Transport} // 无 Timeout
-	rc, status, _, err := c.ChatStream(&auth.Auth{AccessToken: "at", UID: "u1"}, []byte(`{"model":"glm-5.2","messages":[]}`))
+	rc, status, _, err := c.ChatStream(context.Background(), &auth.Auth{AccessToken: "at", UID: "u1"}, []byte(`{"model":"glm-5.2","messages":[]}`))
 	if err != nil || status != 200 {
 		t.Fatalf("chat: status=%d err=%v", status, err)
 	}
@@ -254,7 +255,7 @@ func TestChatStreamHTTPError(t *testing.T) {
 		return jsonResp(429, `rate limited`), nil
 	})
 	a := &auth.Auth{AccessToken: "at", UID: "u1"}
-	_, status, respBody, err := c.ChatStream(a, []byte(`{}`))
+	_, status, respBody, err := c.ChatStream(context.Background(), a, []byte(`{}`))
 	if status != 429 {
 		t.Errorf("status=%d", status)
 	}

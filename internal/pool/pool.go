@@ -337,7 +337,11 @@ func (p *Pool) SetPacks(uid string, packs []PackInfo) {
 		}
 	}
 	e.packs = kept
-	if soonest > 0 || len(packs) == 0 {
+	// 无任何「仍有余量且有到期日」的包 → expireAt 归零（未知，退回积分排序）。
+	// 2026-10-25 修复：旧条件 `soonest > 0 || len(packs) == 0` 在「输入非空但全部
+	// 过期超 48h」时保留陈旧 expireAt，expireBucket 会把该账号判为最早过期
+	// 永远优先选中 → 1005 → 冷却 → 再选中的死循环，挤掉健康账号。
+	if soonest > 0 || len(kept) == 0 {
 		e.expireAt = soonest
 	}
 }

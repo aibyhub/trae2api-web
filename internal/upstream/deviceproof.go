@@ -25,7 +25,9 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -66,7 +68,8 @@ func LoadOrCreateDeviceCredentials(path string) (*DeviceCredentials, error) {
 		if json.Unmarshal(raw, &dc) == nil && dc.PrivateKeyPEM != "" && dc.PublicKeyPEM != "" {
 			return &dc, nil
 		}
-		// 损坏文件走重建（下面统一逻辑）
+		// 损坏文件走重建（设备身份变更 → 上游侧旧绑定悬空，务必留证）
+		log.Printf("device key file corrupt (%s) — regenerating (device identity will change)", path)
 	}
 	dc, err := generateDeviceCredentials()
 	if err != nil {
@@ -76,7 +79,7 @@ func LoadOrCreateDeviceCredentials(path string) (*DeviceCredentials, error) {
 	if err != nil {
 		return nil, err
 	}
-	if dir := dirOf(path); dir != "" && dir != "." {
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
 		_ = os.MkdirAll(dir, 0o755)
 	}
 	tmp := path + ".tmp"
@@ -182,16 +185,6 @@ func BuildDeviceInfo(a *auth.Auth, dc *DeviceCredentials) map[string]any {
 		info["DevicePublicKey"] = dc.PublicKeyPEM
 	}
 	return info
-}
-
-// dirOf 返回路径目录部分（filepath.Dir 的包内薄封装，便于测试）。
-func dirOf(path string) string {
-	for i := len(path) - 1; i >= 0; i-- {
-		if path[i] == '/' || path[i] == '\\' {
-			return path[:i]
-		}
-	}
-	return ""
 }
 
 // parsePEMPubKey 解析 SPKI PEM → *ecdsa.PublicKey（验签/联调用）。

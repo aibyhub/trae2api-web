@@ -132,9 +132,8 @@ func scanLine(st *sseState, line string) *SOLOEvent {
 		st.event = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
 	case strings.HasPrefix(line, "data:"):
 		st.data.WriteString(strings.TrimPrefix(line, "data:"))
-	case strings.HasPrefix(line, ":"):
-		// 注释行忽略
 	}
+	// 其余（":" 注释行等）无动作忽略——不放空 case 避开 staticcheck SA4017 误报
 	return nil
 }
 

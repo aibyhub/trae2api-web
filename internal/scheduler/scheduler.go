@@ -92,6 +92,11 @@ func (s *Scheduler) Run(ctx context.Context) {
 	// 启动即回填一次（冷启动后积分轨迹/到期分布立即可用），之后按周期续刷。
 	if s.cfg.BalanceRefresh > 0 {
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("scheduler: recovered panic in refreshBalances: %v", r)
+				}
+			}()
 			select {
 			case <-ctx.Done():
 				return
@@ -166,6 +171,11 @@ func (s *Scheduler) scheduleCheckins(ctx context.Context) {
 		}
 		d := jitterDuration(window)
 		go func(uid string, d time.Duration) {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("scheduler: recovered panic in checkin uid=%s: %v", uid, r)
+				}
+			}()
 			if d > 0 {
 				t := time.NewTimer(d)
 				defer t.Stop()
@@ -374,6 +384,11 @@ func (s *Scheduler) scheduleDigest(ctx context.Context) {
 	}
 	d := time.Duration(s.cfg.JitterMinutes)*time.Minute + 2*time.Minute
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("scheduler: recovered panic in digest: %v", r)
+			}
+		}()
 		t := time.NewTimer(d)
 		defer t.Stop()
 		select {

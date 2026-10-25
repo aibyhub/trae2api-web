@@ -73,7 +73,7 @@ func (h *Handler) adminAccounts(w http.ResponseWriter, r *http.Request) {
 		sum.ExpireAt = s.ExpireAt // 积分包最近过期时刻（选号「先过期优先」的依据）
 		if a := h.cfg.Pool.AuthByUID(s.UID); a != nil {
 			sum.HasAuth = true
-			sum.ExpiresAt = a.ExpiresAt
+			sum.ExpiresAt = a.ExpiresAtValue()
 			if a.ExpiresAt > 0 && a.NeedsRefresh(24*60*60) { // 24h 内过期
 				sum.ExpiredSoon = true
 			}
@@ -604,7 +604,7 @@ func (h *Handler) adminRefreshAccount(w http.ResponseWriter, r *http.Request) {
 	st, _ := h.cfg.Pool.Status(uid)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"uid":        uid,
-		"expires_at": a.ExpiresAt,
+		"expires_at": a.ExpiresAtValue(),
 		"status":     st,
 	})
 }

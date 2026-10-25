@@ -52,9 +52,11 @@ func BuildLoginURL(machineID, deviceID, callbackURL, codeChallenge string) strin
 		"&device_id=" + url.QueryEscape(deviceID) +
 		"&x_device_id=" + url.QueryEscape(deviceID) +
 		"&x_machine_id=" + url.QueryEscape(machineID) +
-		"&x_device_brand=PC" +
-		"&x_device_type=PC" +
-		"&x_os_version=1.0" +
+		// 设备参数用真机口径（buildLoginUrl 取 deviceModel/osName/osVersion，
+		// 2026-10-25 抓包实录）；此前占位值 PC/PC/1.0 与真机指纹不符。
+		"&x_device_brand=" + url.QueryEscape(upstream.DeviceBrand) +
+		"&x_device_type=" + url.QueryEscape(upstream.DeviceOSName) +
+		"&x_os_version=" + url.QueryEscape(upstream.OSVersion) +
 		"&x_app_version=" + url.QueryEscape(loginAppVersion) +
 		"&x_app_type=stable"
 }

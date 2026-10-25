@@ -7,9 +7,10 @@
 // 顺序对 JA3 都是逐位敏感的，凭记忆改动 = 指纹漂移 = 伪装失效。
 //
 // 形态摘要（ja3_md5 1c2c525d82e765c1db6bc2f274eff51c）：
-//   TLS 1.2 封顶（无 supported_versions）、18 个纯 TLS1.2 ECDHE cipher、
-//   7 个扩展（SNI/groups/points/sigalgs/ticket/EMS/renego）、曲线 x25519-p256-p384、
-//   无 ALPN（即 HTTP/1.1）、无 GREASE。
+//
+//	TLS 1.2 封顶（无 supported_versions）、18 个纯 TLS1.2 ECDHE cipher、
+//	7 个扩展（SNI/groups/points/sigalgs/ticket/EMS/renego）、曲线 x25519-p256-p384、
+//	无 ALPN（即 HTTP/1.1）、无 GREASE。
 package tlsfp
 
 import (
@@ -23,8 +24,8 @@ import (
 	"strings"
 	"time"
 
-	"golang.org/x/net/proxy"
 	utls "github.com/refraction-networking/utls"
+	"golang.org/x/net/proxy"
 )
 
 // HandshakeTimeout tlsfp 握手硬上限。自定义 DialTLSContext 生效后标准库的
@@ -60,7 +61,7 @@ func TraeSpec() *utls.ClientHelloSpec {
 			&utls.SupportedPointsExtension{SupportedPoints: []byte{0}},
 			&utls.SignatureAlgorithmsExtension{SupportedSignatureAlgorithms: ahanetSigAlgs},
 			&utls.SessionTicketExtension{},
-			&utls.UtlsExtendedMasterSecretExtension{},
+			&utls.ExtendedMasterSecretExtension{},
 			&utls.RenegotiationInfoExtension{Renegotiation: utls.RenegotiateOnceAsClient},
 		},
 	}

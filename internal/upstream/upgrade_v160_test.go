@@ -3,6 +3,7 @@
 package upstream
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/sha256"
 	"encoding/base64"
@@ -13,6 +14,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"trae2api-web/internal/auth"
 )
@@ -249,5 +251,74 @@ func TestPrepareBodyReasoningEffortPassthrough(t *testing.T) {
 	}
 	if obj["function"] != Function || obj["config_name"] != "glm-5.2" {
 		t.Fatalf("core fields wrong: function=%v config=%v", obj["function"], obj["config_name"])
+	}
+}
+
+// --- P1-2 ChatStream context 取消止损 ---
+
+func TestChatStreamContextCancel(t *testing.T) {
+	// 客户端断开（ctx 取消）→ 上游请求同步终止，不再陪跑完整生成。
+	// mock 传输需自观察 r.Context()（与真实 net/http.Transport 语义一致）。
+	block := make(chan struct{})
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		select {
+		case <-block:
+			return jsonResp(200, `{"ok":true}`), nil
+		case <-r.Context().Done():
+			return nil, r.Context().Err()
+		}
+	})
+	a := &auth.Auth{AccessToken: "at", UID: "u1"}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, _, _, err := c.ChatStream(ctx, a, []byte(`{}`))
+		done <- err
+	}()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("canceled ctx should abort the upstream request with an error")
+		}
+		if !strings.Contains(err.Error(), context.Canceled.Error()) {
+			t.Fatalf("error not context.Canceled: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		close(block)
+		t.Fatal("ChatStream did not return after ctx cancel")
+	}
+}
+
+// TestExchangeV3SchemaMismatchFallsBack v3 返回 HTTP 200 但缺 Result.Token（schema 意外）
+// 时，必须同样回退 legacy——不留半更新、不让 refresh 整体失败（2026-10-25 加固）。
+func TestExchangeV3SchemaMismatchFallsBack(t *testing.T) {
+	exchangeV3Enabled()
+	defer func() { exchangeV3Val = false }()
+	exchangeV3Val = true
+
+	var calls []string
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		calls = append(calls, r.URL.Path)
+		switch r.URL.Path {
+		case EpExchangeV3:
+			return jsonResp(200, `{"Result":{"Unrelated":"field"}}`), nil
+		case EpExchange:
+			return jsonResp(200, `{"Result":{"Token":"legacy-at","RefreshToken":"legacy-rt","TokenExpireDuration":86400}}`), nil
+		}
+		return nil, fmt.Errorf("unexpected path %s", r.URL.Path)
+	})
+	dc, _ := generateDeviceCredentials()
+	c.DeviceCreds = dc
+	a := &auth.Auth{RefreshToken: "old-rt", AccessToken: "old-at"}
+	if err := c.RefreshToken(a); err != nil {
+		t.Fatalf("refresh should succeed via legacy fallback: %v", err)
+	}
+	if len(calls) != 2 || calls[0] != EpExchangeV3 || calls[1] != EpExchange {
+		t.Fatalf("expected v3-then-legacy calls, got %v", calls)
+	}
+	if a.AccessToken != "legacy-at" {
+		t.Fatalf("legacy token not applied: %+v", a)
 	}
 }

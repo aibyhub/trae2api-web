@@ -92,9 +92,6 @@ type Handler struct {
 	details *DetailStore // 调用明细存档（请求/返回/提示词，保留 30 天）
 	proxies *ProxyPool   // 代理池（账号按名称选用）
 
-	// prompt 系统提示词策略（Mode: "trae"=注入固定提示词，"off"=透传）。
-	prompt PromptConfig
-
 	// Web 登录 pending 态：pendingID → 登录进行中的临时上下文。
 	// 回调 /authorize 捕获后标记成功；面板轮询 result 取结果。
 	loginMu sync.Mutex
@@ -396,6 +393,8 @@ var staticModels = []map[string]any{
 	{"id": "qwen3.8-flash", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
 	{"id": "qwen3.8-max", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
 	{"id": "seed-2.1-pro-evolving", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
+	{"id": "Doubao-Seed-Evolving", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
+	{"id": "minimax-m3.1-flash", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
 }
 
 // dynamicModelsCache 动态模型菜单缓存（2026-10-22 口径改版）：
@@ -414,8 +413,6 @@ var dynamicModelsCache struct {
 	ids     []upstream.ModelInfo
 	fetched time.Time
 }
-
-const modelsFetchFailCooldown = 5 * time.Minute // 失败后的最小重试间隔（防手动/定时风暴中的重试洪水）
 
 var modelsRefreshInFlight atomic.Bool // 同一时刻至多一次菜单拉取在飞（防双击/定时叠加）
 
@@ -552,6 +549,41 @@ func setModelInBody(body []byte, configName string) []byte {
 	return out
 }
 
+// modelSupportsThinking 模型是否支持思考（batch 菜单 reasoning_effort_config）；
+// 模型未知/菜单未下发 → true（保守透传，不误剥）。
+func modelSupportsThinking(model string) bool {
+	for _, mi := range cachedModelInfos() {
+		if mi.ID == model {
+			return mi.SupportThinking
+		}
+	}
+	return true
+}
+
+// stripReasoningParams 对不支持思考的模型剥掉 reasoning_effort / reasoning_effort_level，
+// 防上游 400 把调用方参数问题记成账号错误（2026-10-25 门控）。
+func stripReasoningParams(body []byte) []byte {
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return body
+	}
+	changed := false
+	for _, k := range []string{"reasoning_effort", "reasoning_effort_level", "reasoning"} {
+		if _, ok := obj[k]; ok {
+			delete(obj, k)
+			changed = true
+		}
+	}
+	if !changed {
+		return body
+	}
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
 	if err != nil {
@@ -580,6 +612,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusServiceUnavailable, "model_temporarily_down",
 			"model "+configName+" is currently unstable upstream (repeated stalls); retry later or switch model")
 		return
+	}
+	if !modelSupportsThinking(configName) {
+		body = stripReasoningParams(body)
 	}
 	body = setModelInBody(body, configName)
 	// 系统提示词策略：统一注入固定的 Trae 风格提示词（单一 system，不叠加），
@@ -712,7 +747,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			_ = acct.SaveAtomic()
 		}
 
-		rc, status, respBody, terr := h.cfg.Upstream.ChatStream(acct, body)
+		rc, status, respBody, terr := h.cfg.Upstream.ChatStream(r.Context(), acct, body)
 		if terr != nil {
 			lastErr = terr
 			if upstream.IsTransportError(terr) {

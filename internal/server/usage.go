@@ -297,11 +297,6 @@ func (s *UsageStore) Today() UsageToday {
 
 func round2(f float64) float64 { return float64(int64(f*100+0.5)) / 100 }
 
-// sortEntriesByTimeDesc 面板展示辅助（Recent 已保证，留作 API 兜底）。
-func sortEntriesByTimeDesc(es []UsageEntry) {
-	sort.Slice(es, func(i, j int) bool { return es[i].TS > es[j].TS })
-}
-
 // parseTokenUsage 解析上游 token_usage（Anthropic 风格键为主，兼容 OpenAI 风格），
 // 并带出提示词缓存的创建/命中 tokens。
 func parseTokenUsage(m map[string]any) (prompt, completion, total, cacheRead, cacheCreation int64) {

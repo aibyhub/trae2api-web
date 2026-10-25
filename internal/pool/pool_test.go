@@ -1,4 +1,4 @@
-﻿package pool
+package pool
 
 import (
 	"os"
@@ -8,6 +8,16 @@ import (
 
 	"trae2api-web/internal/auth"
 )
+
+// expireAtOf 白盒读取账号当前 expireAt。
+func (p *Pool) expireAtOf(uid string) int64 {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if e, ok := p.byUID[uid]; ok {
+		return e.expireAt
+	}
+	return -1
+}
 
 func TestPickHighestCredits(t *testing.T) {
 	p := New("")
@@ -342,5 +352,27 @@ func TestStateFileBackwardCompat(t *testing.T) {
 	got := p.Pick()
 	if got == nil || got.UID != "u1" {
 		t.Fatalf("old-format account should be pickable, got %+v", got)
+	}
+}
+
+// TestSetPacksAllStaleResetsExpire 全部积分包过期超 48h → expireAt 必须归零，
+// 否则 expireBucket 把该账号判为最早过期永远优先选中（1005 死循环，2026-10-25 修复）。
+func TestSetPacksAllStaleResetsExpire(t *testing.T) {
+	p := New("")
+	stale := time.Now().Add(-72 * time.Hour).Unix()
+	p.Add(&auth.Auth{UID: "u1"})
+	p.SetExpiry("u1", time.Now().Add(24*time.Hour).Unix())
+	if got := p.expireAtOf("u1"); got == 0 {
+		t.Fatal("precondition: expireAt should be set")
+	}
+	p.SetPacks("u1", []PackInfo{{Limit: 100, Used: 0, ExpireAt: stale}})
+	if got := p.expireAtOf("u1"); got != 0 {
+		t.Fatalf("all-stale packs must reset expireAt to 0, got %d", got)
+	}
+	// 反向：存在仍有效包 → expireAt = 该包到期
+	fresh := time.Now().Add(48 * time.Hour).Unix()
+	p.SetPacks("u1", []PackInfo{{Limit: 100, Used: 10, ExpireAt: fresh}})
+	if got := p.expireAtOf("u1"); got != fresh {
+		t.Fatalf("fresh pack expireAt=%d want %d", got, fresh)
 	}
 }

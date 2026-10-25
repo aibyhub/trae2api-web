@@ -1,4 +1,4 @@
-﻿// headers.go SOLO 三类请求头：对话（SOLOHeaders）/ ug（UgHeaders）/ oauth（OAuthHeaders）。
+// headers.go SOLO 三类请求头：对话（SOLOHeaders）/ ug（UgHeaders）/ oauth（OAuthHeaders）。
 package upstream
 
 import (
@@ -45,6 +45,7 @@ func SOLOHeaders(req *http.Request, a *auth.Auth, stream bool) {
 	req.Header.Set("X-Device-Type", "windows")
 	req.Header.Set("X-OS-Version", OSVersion)
 	req.Header.Set("X-Device-Brand", DeviceBrand)
+	req.Header.Set("X-Device-Cpu", DeviceCPU)
 	req.Header.Set("Request-Traffic-Type", "prod")
 	// 追踪头（2026-10-25 真机原生日志 add_header 实录对齐）：
 	//   x-custom-trace-id: <hex32>（trace 值本体）

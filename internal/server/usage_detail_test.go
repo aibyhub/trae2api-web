@@ -103,8 +103,8 @@ func TestUsageDetailFallbackChain(t *testing.T) {
 	}
 
 	// C2. 归档缺失 + usage 行在（uid 非空但只有 usage 记录，如同日归档被手动清走）
-	code, d = usageGet(t, h, "/admin/api/usage/detail?ts="+itoa(tsEmpty+99)+"&uid=")
-	_ = code // 无记录 ts+uid 空串 → 走 D 分支，不单独断言
+	// 无记录 ts+uid 空串 → 走 D 分支，不单独断言（SA4006：d 在此分支未使用）
+	_, _ = usageGet(t, h, "/admin/api/usage/detail?ts="+itoa(tsEmpty+99)+"&uid=")
 
 	// D. 两边都没有 → 404
 	code, d = usageGet(t, h, "/admin/api/usage/detail?ts=111&uid=")

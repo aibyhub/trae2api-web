@@ -4,6 +4,7 @@ package upstream
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -243,7 +244,16 @@ func (c *Client) clientFor(a *auth.Auth) (std, stream *http.Client) {
 		return p.std, p.stream
 	}
 	u, err := url.Parse(proxy)
-	if err != nil || !ValidProxyScheme(u.Scheme) {
+	// 注意：url.Parse 失败时返回 nil URL——必须先短路 err 分支，禁止在同一
+	// 条件里解引用 u（2026-10-25 修复：畸形 proxyUrl 曾在日志行空指针 panic，
+	// 且 scheduler goroutine 无 recover 会杀死整个进程）。
+	if err != nil {
+		log.Printf("proxy config invalid (%q, parse: %v) — fallback to DIRECT", proxy, err)
+		p := &proxyPair{std: std, stream: stream}
+		c.proxyClients.Store(proxy, p)
+		return p.std, p.stream
+	}
+	if !ValidProxyScheme(u.Scheme) {
 		// 回退直连 = 真实出口 IP 不再是该账号配置的代理，务必留证。
 		// 校验层（server.validProxyURL）与本处共用 ValidProxyScheme，正常不该走到这里。
 		log.Printf("proxy config invalid (%q, scheme=%q) — fallback to DIRECT", proxy, u.Scheme)
@@ -437,6 +447,16 @@ func (c *Client) refreshLocked(a *auth.Auth) error {
 	return nil
 }
 
+// hasExchangeToken 检查 ExchangeToken 响应是否带 Result.Token（v3 回退判定用）。
+func hasExchangeToken(data []byte) bool {
+	var resp struct {
+		Result struct {
+			Token string `json:"Token"`
+		} `json:"Result"`
+	}
+	return json.Unmarshal(data, &resp) == nil && resp.Result.Token != ""
+}
+
 // exchangeRequest 发 ExchangeToken 请求并返回响应体与所用端点。
 // v3 可用（开关 + 设备密钥）先试 v3，失败退 legacy；v3 不可用直接 legacy。
 // v3 主机 = api.trae.cn（2026-10-25 真机抓包实录：客户端 v3 与 GetUserInfo 都走
@@ -456,10 +476,15 @@ func (c *Client) exchangeRequest(host string, a *auth.Auth) ([]byte, string, err
 			if req, rerr := http.NewRequest(http.MethodPost, c.ugBase()+EpExchangeV3, bytes.NewReader(raw)); rerr == nil {
 				ExchangeV3Headers(req, a.AccessToken) // 已持 a 写锁，直接读
 				data, derr := c.doJSON(req, a)
-				if derr == nil {
+				if derr == nil && hasExchangeToken(data) {
 					return data, EpExchangeV3, nil
 				}
-				log.Printf("exchange v3 failed (%v) — fallback to legacy endpoint", derr)
+				if derr != nil {
+					log.Printf("exchange v3 failed (%v) — fallback to legacy endpoint", derr)
+				} else {
+					// HTTP 200 但响应缺 Result.Token（schema 意外）→ 同样回退，不留半更新
+					log.Printf("exchange v3 response missing Result.Token — fallback to legacy endpoint")
+				}
 			} else {
 				log.Printf("exchange v3 request build failed (%v) — fallback to legacy endpoint", rerr)
 			}
@@ -501,8 +526,10 @@ func normalizeExpiresAt(v int64) int64 {
 // ChatStream 发 llm_utils_chat 请求并返回原始 SSE body 流（调用方负责 Close）。
 // 非 2xx 时 rc 为 nil、body 为上游响应体（供调用方 Classify）、err 为 nil；
 // 只有传输层失败才返回 err。
-func (c *Client) ChatStream(a *auth.Auth, body []byte) (rc io.ReadCloser, status int, respBody []byte, err error) {
-	req, err := http.NewRequest(http.MethodPost, c.agentBase()+EpChat, bytes.NewReader(PrepareBody(body)))
+// ctx 贯穿上游请求：下游客户端断开（r.Context() 取消）→ 上游请求同步终止——
+// 计费型网关的「取消即止损」，非流式聚合路径不再陪跑完整生成（2026-10-25 修复）。
+func (c *Client) ChatStream(ctx context.Context, a *auth.Auth, body []byte) (rc io.ReadCloser, status int, respBody []byte, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.agentBase()+EpChat, bytes.NewReader(PrepareBody(body)))
 	if err != nil {
 		return nil, 0, nil, err
 	}
@@ -537,8 +564,11 @@ type ModelInfo struct {
 	MaxTokens     int64   // = maxOutputTokens
 	Rate          float64 // 官方消耗倍率（display_contact_config.consumption_rate.data.rate），0 = 上游未下发
 	FeeLevel      int     // display_config.fee_model_level
-	Custom        bool    // is_custom_model：客户端自定义模型占位
-	Invisible     bool    // is_invisible_to_user：内部模型（subagent 等），客户端模型列表不展示
+	// SupportThinking 该模型是否支持思考（batch 菜单 reasoning_effort_config.support_thinking）。
+	// 菜单未下发时默认 true（保守维持透传现状，不误剥参数）。
+	SupportThinking bool
+	Custom          bool // is_custom_model：客户端自定义模型占位
+	Invisible       bool // is_invisible_to_user：内部模型（subagent 等），客户端模型列表不展示
 }
 
 // modelConfigEntry get_detail_param / batch_get_detail_param 共用的模型条目字段。
@@ -561,6 +591,11 @@ type modelConfigEntry struct {
 	// ContextWindowTokens batch 端点（2026-10-25 生产验证）的按变体 map，
 	// 如 {"dev":200000}；取最大值作为对外 context window。
 	ContextWindowTokens map[string]int64 `json:"context_window_tokens"`
+	// Reasoning batch 菜单的 reasoning_effort_config（指针判存在性）：
+	// support_thinking=false 的模型（实测 glm-5.2）不应再收 reasoning 参数。
+	Reasoning *struct {
+		SupportThinking bool `json:"support_thinking"`
+	} `json:"reasoning_effort_config"`
 }
 
 // detailParamResp 两代菜单端点响应的兼容解析：
@@ -612,14 +647,19 @@ func parseModelConfigs(entries []modelConfigEntry) []ModelInfo {
 				cw = v
 			}
 		}
+		supportThinking := true
+		if cfg.Reasoning != nil {
+			supportThinking = cfg.Reasoning.SupportThinking
+		}
 		out = append(out, ModelInfo{
-			ID:            cfg.ConfigName,
-			Name:          cfg.DisplayConfig.DisplayName,
-			ContextWindow: cw,
-			Rate:          rate,
-			FeeLevel:      cfg.DisplayConfig.FeeModelLevel,
-			Custom:        cfg.IsCustomModel,
-			Invisible:     cfg.Invisible,
+			ID:              cfg.ConfigName,
+			Name:            cfg.DisplayConfig.DisplayName,
+			ContextWindow:   cw,
+			SupportThinking: supportThinking,
+			Rate:            rate,
+			FeeLevel:        cfg.DisplayConfig.FeeModelLevel,
+			Custom:          cfg.IsCustomModel,
+			Invisible:       cfg.Invisible,
 		})
 	}
 	return out
@@ -663,13 +703,13 @@ func (c *Client) fetchModelsOnce(a *auth.Auth, ep string) ([]ModelInfo, error) {
 // functions 传网关自己的通道（solo_work_lite，实测与 legacy 名单一致，48 模型）。
 func (c *Client) fetchModelsBatch(a *auth.Auth) ([]ModelInfo, error) {
 	body := map[string]any{
-		"functions":               []string{Function},
-		"agentType":               "",
-		"currentConfigInfo":       map[string]any{"configName": "", "isCustomModel": false},
-		"modeType":                "Manual",
-		"accessType":              "SoloLite",
-		"abForceVids":             "",
-		"abAutotestAdvancedMode":  0,
+		"functions":              []string{Function},
+		"agentType":              "",
+		"currentConfigInfo":      map[string]any{"configName": "", "isCustomModel": false},
+		"modeType":               "Manual",
+		"accessType":             "SoloLite",
+		"abForceVids":            "",
+		"abAutotestAdvancedMode": 0,
 	}
 	raw, _ := json.Marshal(body)
 	req, err := http.NewRequest(http.MethodPost, c.agentBase()+EpModelsBatch, bytes.NewReader(raw))
@@ -788,8 +828,8 @@ func ugMsg(message, msg string) string {
 
 // Activity 单个商业活动条目（activity/info 返回）。
 type Activity struct {
-	ID        string `json:"id"`       // activity_id，如 checkin_credits / student_auth_reward
-	Type      int    `json:"type"`     // activity_type：102 新用户 /103 裂变 /104 签到 /105 发言奖励 /106 桌面下载 /107 学生认证
+	ID        string `json:"id"`   // activity_id，如 checkin_credits / student_auth_reward
+	Type      int    `json:"type"` // activity_type：102 新用户 /103 裂变 /104 签到 /105 发言奖励 /106 桌面下载 /107 学生认证
 	Grantable bool   `json:"grantable"`
 	Granted   bool   `json:"granted"`
 }
