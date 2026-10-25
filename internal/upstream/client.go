@@ -393,46 +393,19 @@ func (c *Client) RefreshTokenIfNeeded(a *auth.Auth, skew time.Duration) (bool, e
 
 // refreshLocked 是 RefreshToken 的持锁内部实现；调用方必须已持有 a 写锁。
 // 任何失败路径都不改写 a 字段，保证旧 refreshToken 可重试。
-// TW2A_EXCHANGE_V3=1 且设备密钥可用时走 v3 端点（/trae/api/v3/oauth/ExchangeToken
-// + DeviceProof 签名，2026-10 真机 1.107.1 口径）；否则走旧端点（当前仍工作）。
+// TW2A_EXCHANGE_V3=1 且设备密钥可用时先走 v3 端点（/trae/api/v3/oauth/ExchangeToken
+// + DeviceProof 签名，2026-10 真机 1.107.1 口径）；**v3 任何失败自动回退 legacy**——
+// 上游 v3 若校验失败回 401，兜底保证账号不会被误判 session-dead（2026-10-25 加固，
+// 让 TW2A_EXCHANGE_V3 成为零风险开关）。
 func (c *Client) refreshLocked(a *auth.Auth) error {
 	if strings.TrimSpace(a.RefreshToken) == "" {
 		return fmt.Errorf("no refreshToken")
 	}
-	body := map[string]any{
-		"ClientID":     c.ClientID,
-		"RefreshToken": a.RefreshToken, // 已持 a 写锁，直接读
-		"ClientSecret": "-",
-		"UserID":       "",
-	}
-	ep := EpExchange
 	host := a.ApiHost
 	if host == "" {
 		host = c.oauthBase()
 	}
-	if c.useExchangeV3() {
-		proof, err := c.DeviceCreds.SignDeviceProof(http.MethodPost, EpExchangeV3, c.ClientID, a.RefreshToken)
-		if err != nil {
-			log.Printf("exchange v3: device proof unavailable (%v) — fallback to legacy endpoint", err)
-		} else {
-			body = map[string]any{
-				"ClientID":     c.ClientID,
-				"ClientSecret": "",
-				"RefreshToken": a.RefreshToken,
-				"DeviceInfo":   BuildDeviceInfo(a, c.DeviceCreds),
-				"DeviceProof":  proof,
-				"IDEVersion":   IdeVersion,
-			}
-			ep = EpExchangeV3
-		}
-	}
-	raw, _ := json.Marshal(body)
-	req, err := http.NewRequest(http.MethodPost, host+ep, bytes.NewReader(raw))
-	if err != nil {
-		return err
-	}
-	OAuthHeaders(req)
-	data, err := c.doJSON(req, a)
+	data, ep, err := c.exchangeRequest(host, a)
 	if err != nil {
 		return err
 	}
@@ -449,7 +422,7 @@ func (c *Client) refreshLocked(a *auth.Auth) error {
 		return fmt.Errorf("exchange parse: %w", err)
 	}
 	if resp.Result.Token == "" {
-		return fmt.Errorf("refresh_failed: no token in response — re-login required")
+		return fmt.Errorf("refresh_failed: no token in response (%s) — re-login required", ep)
 	}
 	a.AccessToken = resp.Result.Token
 	if resp.Result.RefreshToken != "" {
@@ -462,6 +435,50 @@ func (c *Client) refreshLocked(a *auth.Auth) error {
 		a.ExpiresAt = time.Now().Add(time.Duration(resp.Result.TokenExpireDuration) * time.Second).Unix()
 	}
 	return nil
+}
+
+// exchangeRequest 发 ExchangeToken 请求并返回响应体与所用端点。
+// v3 可用（开关 + 设备密钥）先试 v3，失败退 legacy；v3 不可用直接 legacy。
+func (c *Client) exchangeRequest(host string, a *auth.Auth) ([]byte, string, error) {
+	if c.useExchangeV3() {
+		if proof, perr := c.DeviceCreds.SignDeviceProof(http.MethodPost, EpExchangeV3, c.ClientID, a.RefreshToken); perr == nil {
+			v3Body := map[string]any{
+				"ClientID":     c.ClientID,
+				"ClientSecret": "",
+				"RefreshToken": a.RefreshToken, // 已持 a 写锁，直接读
+				"DeviceInfo":   BuildDeviceInfo(a, c.DeviceCreds),
+				"DeviceProof":  proof,
+				"IDEVersion":   IdeVersion,
+			}
+			raw, _ := json.Marshal(v3Body)
+			if req, rerr := http.NewRequest(http.MethodPost, host+EpExchangeV3, bytes.NewReader(raw)); rerr == nil {
+				OAuthHeaders(req)
+				data, derr := c.doJSON(req, a)
+				if derr == nil {
+					return data, EpExchangeV3, nil
+				}
+				log.Printf("exchange v3 failed (%v) — fallback to legacy endpoint", derr)
+			} else {
+				log.Printf("exchange v3 request build failed (%v) — fallback to legacy endpoint", rerr)
+			}
+		} else {
+			log.Printf("exchange v3: device proof unavailable (%v) — legacy endpoint", perr)
+		}
+	}
+	body := map[string]any{
+		"ClientID":     c.ClientID,
+		"RefreshToken": a.RefreshToken, // 已持 a 写锁，直接读
+		"ClientSecret": "-",
+		"UserID":       "",
+	}
+	raw, _ := json.Marshal(body)
+	req, err := http.NewRequest(http.MethodPost, host+EpExchange, bytes.NewReader(raw))
+	if err != nil {
+		return nil, EpExchange, err
+	}
+	OAuthHeaders(req)
+	data, err := c.doJSON(req, a)
+	return data, EpExchange, err
 }
 
 // useExchangeV3 v3 端点是否可用：开关开启且设备密钥已装配。
@@ -522,7 +539,91 @@ type ModelInfo struct {
 	Invisible     bool    // is_invisible_to_user：内部模型（subagent 等），客户端模型列表不展示
 }
 
-// fetchModelsOnce 对指定菜单端点发一次请求并解析 config_info_list。
+// modelConfigEntry get_detail_param / batch_get_detail_param 共用的模型条目字段。
+type modelConfigEntry struct {
+	ConfigName    string `json:"config_name"`
+	IsCustomModel bool   `json:"is_custom_model"`
+	Invisible     bool   `json:"is_invisible_to_user"`
+	DisplayConfig struct {
+		DisplayName   string `json:"display_name"`
+		FeeModelLevel int    `json:"fee_model_level"`
+	} `json:"display_config"`
+	// display_contact_config 是内嵌 JSON 字符串，consumption_rate.data.rate
+	// 为该模型的官方积分消耗倍率（实测 glm-5.2 rate=0.78 等）。
+	DisplayContactConfig string `json:"display_contact_config"`
+	ModelDetailList      []struct {
+		ModelName string `json:"model_name"`
+	} `json:"model_detail_list"`
+	// ContextWindowSize 旧端点偶发的平坦字段（2026-10 客户端模型配置结构体实锤）。
+	ContextWindowSize int64 `json:"context_window_size"`
+	// ContextWindowTokens batch 端点（2026-10-25 生产验证）的按变体 map，
+	// 如 {"dev":200000}；取最大值作为对外 context window。
+	ContextWindowTokens map[string]int64 `json:"context_window_tokens"`
+}
+
+// detailParamResp 两代菜单端点响应的兼容解析：
+// legacy get_detail_param = 顶层 config_info_list；
+// batch_get_detail_param = function_configs[].config_info_list（每个 function 一份）。
+type detailParamResp struct {
+	ConfigInfoList  []modelConfigEntry `json:"config_info_list"`
+	FunctionConfigs []struct {
+		Function       string             `json:"function"`
+		ConfigInfoList []modelConfigEntry `json:"config_info_list"`
+	} `json:"function_configs"`
+}
+
+// listFor 取指定 function 的名单：优先 batch 形态中匹配 function 的份，
+// 否则回退顶层列表（legacy 形态）。
+func (r *detailParamResp) listFor(function string) []modelConfigEntry {
+	for _, fc := range r.FunctionConfigs {
+		if fc.Function == function {
+			return fc.ConfigInfoList
+		}
+	}
+	return r.ConfigInfoList
+}
+
+// parseModelConfigs 把名单条目转成 ModelInfo。
+func parseModelConfigs(entries []modelConfigEntry) []ModelInfo {
+	var out []ModelInfo
+	for _, cfg := range entries {
+		if cfg.ConfigName == "" {
+			continue
+		}
+		rate := 0.0
+		if cfg.DisplayContactConfig != "" {
+			var contact struct {
+				ConsumptionRate struct {
+					Enable bool `json:"enable"`
+					Data   struct {
+						Rate float64 `json:"rate"`
+					} `json:"data"`
+				} `json:"consumption_rate"`
+			}
+			if json.Unmarshal([]byte(cfg.DisplayContactConfig), &contact) == nil && contact.ConsumptionRate.Enable {
+				rate = contact.ConsumptionRate.Data.Rate
+			}
+		}
+		cw := cfg.ContextWindowSize
+		for _, v := range cfg.ContextWindowTokens {
+			if v > cw {
+				cw = v
+			}
+		}
+		out = append(out, ModelInfo{
+			ID:            cfg.ConfigName,
+			Name:          cfg.DisplayConfig.DisplayName,
+			ContextWindow: cw,
+			Rate:          rate,
+			FeeLevel:      cfg.DisplayConfig.FeeModelLevel,
+			Custom:        cfg.IsCustomModel,
+			Invisible:     cfg.Invisible,
+		})
+	}
+	return out
+}
+
+// fetchModelsOnce legacy get_detail_param：旧请求体（服务端兼容保留）。
 func (c *Client) fetchModelsOnce(a *auth.Auth, ep string) ([]ModelInfo, error) {
 	body := map[string]any{
 		"function":            Function,
@@ -543,71 +644,57 @@ func (c *Client) fetchModelsOnce(a *auth.Auth, ep string) ([]ModelInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	var resp struct {
-		ConfigInfoList []struct {
-			ConfigName    string `json:"config_name"`
-			IsCustomModel bool   `json:"is_custom_model"`
-			Invisible     bool   `json:"is_invisible_to_user"`
-			DisplayConfig struct {
-				DisplayName   string `json:"display_name"`
-				FeeModelLevel int    `json:"fee_model_level"`
-			} `json:"display_config"`
-			// display_contact_config 是内嵌 JSON 字符串，consumption_rate.data.rate
-			// 为该模型的官方积分消耗倍率（实测 Doubao-Seed-Evolving=0.08 等）。
-			DisplayContactConfig string `json:"display_contact_config"`
-			ModelDetailList      []struct {
-				ModelName string `json:"model_name"`
-			} `json:"model_detail_list"`
-			// ContextWindowSize 2026-10 客户端 1.107.1 模型配置新增
-			// context_window_size（DLL 结构体实锤）；旧端点不下发时保持 0，
-			// 调用方（acceptListNoFetch）自行回退 131072。
-			ContextWindowSize int64 `json:"context_window_size"`
-		} `json:"config_info_list"`
-	}
+	var resp detailParamResp
 	if err := json.Unmarshal(data, &resp); err != nil {
 		return nil, err
 	}
-	var out []ModelInfo
-	for _, cfg := range resp.ConfigInfoList {
-		if cfg.ConfigName == "" {
-			continue
-		}
-		rate := 0.0
-		if cfg.DisplayContactConfig != "" {
-			var contact struct {
-				ConsumptionRate struct {
-					Enable bool `json:"enable"`
-					Data   struct {
-						Rate float64 `json:"rate"`
-					} `json:"data"`
-				} `json:"consumption_rate"`
-			}
-			if json.Unmarshal([]byte(cfg.DisplayContactConfig), &contact) == nil && contact.ConsumptionRate.Enable {
-				rate = contact.ConsumptionRate.Data.Rate
-			}
-		}
-		out = append(out, ModelInfo{
-			ID:            cfg.ConfigName,
-			Name:          cfg.DisplayConfig.DisplayName,
-			ContextWindow: cfg.ContextWindowSize,
-			Rate:          rate,
-			FeeLevel:      cfg.DisplayConfig.FeeModelLevel,
-			Custom:        cfg.IsCustomModel,
-			Invisible:     cfg.Invisible,
-		})
-	}
+	out := parseModelConfigs(resp.listFor(Function))
 	if len(out) == 0 {
 		return nil, fmt.Errorf("models api returned empty list")
 	}
 	return out, nil
 }
 
+// fetchModelsBatch 真机 1.107.1 的 batch 协议（2026-10-25 生产验证通过）：
+// 请求体 serde camelCase（DLL/原生日志里的蛇形是 Rust 字段名），modeType/accessType
+// 为 PascalCase 枚举字符串；响应 function_configs[].config_info_list。
+// functions 传网关自己的通道（solo_work_lite，实测与 legacy 名单一致，48 模型）。
+func (c *Client) fetchModelsBatch(a *auth.Auth) ([]ModelInfo, error) {
+	body := map[string]any{
+		"functions":               []string{Function},
+		"agentType":               "",
+		"currentConfigInfo":       map[string]any{"configName": "", "isCustomModel": false},
+		"modeType":                "Manual",
+		"accessType":              "SoloLite",
+		"abForceVids":             "",
+		"abAutotestAdvancedMode":  0,
+	}
+	raw, _ := json.Marshal(body)
+	req, err := http.NewRequest(http.MethodPost, c.agentBase()+EpModelsBatch, bytes.NewReader(raw))
+	if err != nil {
+		return nil, err
+	}
+	SOLOHeaders(req, a, false)
+	data, err := c.doJSON(req, a)
+	if err != nil {
+		return nil, err
+	}
+	var resp detailParamResp
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, err
+	}
+	out := parseModelConfigs(resp.listFor(Function))
+	if len(out) == 0 {
+		return nil, fmt.Errorf("batch models: no config_info_list for function %s", Function)
+	}
+	return out, nil
+}
+
 // FetchModels 拉 SOLO 模型表。
-// 2026-10 真机 1.107.1 主力端点为 batch_get_detail_param（会话日志 155 次命中，
-// 旧 get_detail_param 零命中），但 batch 的请求/响应 schema 未逐字段验证——
-// 先试 batch，任何失败（HTTP 错误/解析失败/空表）回退旧端点，行为兜底不变。
+// 主力 = 真机 batch 端点（真实 body 已生产验证）；任何失败（HTTP 错误/解析失败/
+// 空表）回退 legacy get_detail_param，行为兜底不变。
 func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
-	infos, batchErr := c.fetchModelsOnce(a, EpModelsBatch)
+	infos, batchErr := c.fetchModelsBatch(a)
 	if batchErr == nil {
 		return infos, nil
 	}

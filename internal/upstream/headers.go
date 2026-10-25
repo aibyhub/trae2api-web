@@ -4,7 +4,6 @@ package upstream
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"fmt"
 	"net/http"
 	"os"
 	"strings"
@@ -47,13 +46,18 @@ func SOLOHeaders(req *http.Request, a *auth.Auth, stream bool) {
 	req.Header.Set("X-OS-Version", OSVersion)
 	req.Header.Set("X-Device-Brand", DeviceBrand)
 	req.Header.Set("Request-Traffic-Type", "prod")
-	// x-request-id / traceparent：真机原生层（ai_agent.dll）对上游请求携带的
-	// 追踪头（DLL 字符串证据，headers 区 9+8 处命中）。每请求独立：
-	// x-request-id 用 UUID v4 形态，traceparent 用 W3C trace-context 格式
-	// （version-traceid-spanid-flags）。生成失败就省略，不阻塞请求。
-	if rid, err := newRequestID(); err == nil {
-		req.Header.Set("X-Request-Id", rid)
-		req.Header.Set("traceparent", traceparentFromID(rid))
+	// 追踪头（2026-10-25 真机原生日志 add_header 实录对齐）：
+	//   x-custom-trace-id: <hex32>（trace 值本体）
+	//   x-flow-traceparent: 04-<trace32>-<span16>-01（真机版本前缀是 04，非 W3C 标准 00）
+	// 真机不发标准 traceparent / x-request-id，这里同样只发真机形态。
+	// 生成失败就省略，不阻塞请求。
+	if tb := make([]byte, 16); fillRand(tb) == nil {
+		trace := hex.EncodeToString(tb)
+		sb := make([]byte, 8)
+		if fillRand(sb) == nil {
+			req.Header.Set("X-Custom-Trace-Id", trace)
+			req.Header.Set("X-Flow-Traceparent", "04-"+trace+"-"+hex.EncodeToString(sb)+"-01")
+		}
 	}
 	if a.MachineID != "" {
 		req.Header.Set("X-Machine-Id", a.MachineID)
@@ -73,27 +77,10 @@ func ugDeviceIDOverride() string {
 	return strings.TrimSpace(os.Getenv("TW2A_UG_DEVICE_ID"))
 }
 
-// newRequestID 生成 UUID v4 形态的请求 ID（真机 x-request-id）。
-func newRequestID() (string, error) {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	b[6] = (b[6] & 0x0f) | 0x40 // version 4
-	b[8] = (b[8] & 0x3f) | 0x80 // variant 10
-	h := hex.EncodeToString(b)
-	return fmt.Sprintf("%s-%s-%s-%s-%s", h[0:8], h[8:12], h[12:16], h[16:20], h[20:32]), nil
-}
-
-// traceparentFromID 由请求 ID 派生 W3C trace-context 头：
-// `00-<32hex traceid>-<16hex spanid>-01`。同请求共用同一 trace id，
-// 与真机「一条请求一条 trace」的形态一致。
-func traceparentFromID(requestID string) string {
-	h := hex.EncodeToString([]byte(requestID))
-	if len(h) < 48 {
-		h = (h + strings.Repeat("0", 48))[:48]
-	}
-	return "00-" + h[:32] + "-" + h[32:48] + "-01"
+// fillRand rand.Read 的错误折叠封装（追踪头属锦上添花，失败即省略）。
+func fillRand(b []byte) error {
+	_, err := rand.Read(b)
+	return err
 }
 
 // UgHeaders 设置签到/积分（api.trae.cn）所需头。
