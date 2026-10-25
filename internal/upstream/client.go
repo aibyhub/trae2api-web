@@ -439,6 +439,8 @@ func (c *Client) refreshLocked(a *auth.Auth) error {
 
 // exchangeRequest 发 ExchangeToken 请求并返回响应体与所用端点。
 // v3 可用（开关 + 设备密钥）先试 v3，失败退 legacy；v3 不可用直接 legacy。
+// v3 主机 = api.trae.cn（2026-10-25 真机抓包实录：客户端 v3 与 GetUserInfo 都走
+// api.trae.cn）；legacy 维持 auth 文件 ApiHost（api.trae.com.cn，生产验证可用）。
 func (c *Client) exchangeRequest(host string, a *auth.Auth) ([]byte, string, error) {
 	if c.useExchangeV3() {
 		if proof, perr := c.DeviceCreds.SignDeviceProof(http.MethodPost, EpExchangeV3, c.ClientID, a.RefreshToken); perr == nil {
@@ -451,8 +453,8 @@ func (c *Client) exchangeRequest(host string, a *auth.Auth) ([]byte, string, err
 				"IDEVersion":   IdeVersion,
 			}
 			raw, _ := json.Marshal(v3Body)
-			if req, rerr := http.NewRequest(http.MethodPost, host+EpExchangeV3, bytes.NewReader(raw)); rerr == nil {
-				OAuthHeaders(req)
+			if req, rerr := http.NewRequest(http.MethodPost, c.ugBase()+EpExchangeV3, bytes.NewReader(raw)); rerr == nil {
+				ExchangeV3Headers(req, a.AccessToken) // 已持 a 写锁，直接读
 				data, derr := c.doJSON(req, a)
 				if derr == nil {
 					return data, EpExchangeV3, nil

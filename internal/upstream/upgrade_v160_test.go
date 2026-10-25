@@ -181,10 +181,12 @@ func TestExchangeV3FallsBackToLegacy(t *testing.T) {
 	exchangeV3Val = true // 白盒翻转开关（同包测试）
 
 	var calls []string
+	var v3Headers http.Header
 	c := testClient(func(r *http.Request) (*http.Response, error) {
-		calls = append(calls, r.URL.Path)
+		calls = append(calls, r.URL.Host+r.URL.Path)
 		switch r.URL.Path {
 		case EpExchangeV3:
+			v3Headers = r.Header.Clone()
 			return jsonResp(401, `{"ResponseMetadata":{"Error":{"Code":"20101","Message":"Token 无效"}}}`), nil
 		case EpExchange:
 			return jsonResp(200, `{"Result":{"Token":"new-at","RefreshToken":"new-rt","TokenExpireDuration":86400}}`), nil
@@ -193,12 +195,19 @@ func TestExchangeV3FallsBackToLegacy(t *testing.T) {
 	})
 	dc, _ := generateDeviceCredentials()
 	c.DeviceCreds = dc
-	a := &auth.Auth{RefreshToken: "old-rt"}
+	a := &auth.Auth{RefreshToken: "old-rt", AccessToken: "old-at"}
 	if err := c.RefreshToken(a); err != nil {
 		t.Fatalf("refresh should succeed via legacy fallback: %v", err)
 	}
-	if len(calls) != 2 || calls[0] != EpExchangeV3 || calls[1] != EpExchange {
-		t.Fatalf("expected v3-then-legacy calls, got %v", calls)
+	if len(calls) != 2 || calls[0] != "ug.example"+EpExchangeV3 || calls[1] != "oauth.example"+EpExchange {
+		t.Fatalf("expected v3(ug.example)-then-legacy(oauth.example) calls, got %v", calls)
+	}
+	// 真机抓包对齐的头：旧 access token 随 X-Cloudide-Token 携带
+	if v3Headers.Get("X-Cloudide-Token") != "old-at" {
+		t.Fatalf("v3 request missing X-Cloudide-Token: %v", v3Headers)
+	}
+	if v3Headers.Get("X-Request-Id") == "" || v3Headers.Get("X-Tt-Trace-Id") == "" {
+		t.Fatalf("v3 request missing trace headers: %v", v3Headers)
 	}
 	if a.AccessToken != "new-at" || a.RefreshToken != "new-rt" {
 		t.Fatalf("token not updated by fallback: %+v", a)

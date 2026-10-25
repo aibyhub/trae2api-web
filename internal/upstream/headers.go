@@ -83,6 +83,38 @@ func fillRand(b []byte) error {
 	return err
 }
 
+// uuidV4 从 16 随机字节构造 UUID v4 字符串。
+func uuidV4(b []byte) string {
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	h := hex.EncodeToString(b)
+	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
+}
+
+// ExchangeV3Headers ExchangeToken v3 的请求头（2026-10-25 真机抓包实录对齐）：
+// UA 为 Chromium 形态（同 UG 通道，非 SOLO 短 UA）；携带当前（旧）access token 于
+// X-Cloudide-Token；附 x-request-id（UUID v4）与 x-tt-trace-id（TTNet 00- 形态）。
+// accessToken 由调用方直接传字段值——本函数只在 refreshLocked 写锁语境下调用，
+// 禁止在此取 a.mu（锁升级死锁，2026-10-25 实测）。
+// 真机另有 x-helios/x-medusa 反滥用签名（MSSdk 生成，无法复刻）——实测缺失不阻断
+// 请求（合成探针与 legacy 同样错误码），失败由 v3→legacy 兜底覆盖。
+func ExchangeV3Headers(req *http.Request, accessToken string) {
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", ugUserAgent)
+	if accessToken != "" {
+		req.Header.Set("X-Cloudide-Token", accessToken)
+	}
+	if b := make([]byte, 16); fillRand(b) == nil {
+		req.Header.Set("X-Request-Id", uuidV4(b))
+		if tb := make([]byte, 16); fillRand(tb) == nil {
+			if sb := make([]byte, 8); fillRand(sb) == nil {
+				req.Header.Set("X-Tt-Trace-Id", "00-"+hex.EncodeToString(tb)+"-"+hex.EncodeToString(sb)+"-01")
+			}
+		}
+	}
+}
+
 // UgHeaders 设置签到/积分（api.trae.cn）所需头。
 // 协议逆向自 TRAE SOLO CN 0.1.64 主进程（resources/app/out/main.js）：
 // UG 请求的应用层头 = cb()（Content-Type + Authorization）+ fb()（5 个设备头），
