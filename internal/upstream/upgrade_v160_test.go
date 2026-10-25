@@ -322,3 +322,22 @@ func TestExchangeV3SchemaMismatchFallsBack(t *testing.T) {
 		t.Fatalf("legacy token not applied: %+v", a)
 	}
 }
+
+// --- P1-1 clientFor 畸形代理 URL 不再 panic ---
+
+func TestClientForMalformedProxyNoPanic(t *testing.T) {
+	// url.Parse 失败时返回 nil URL——旧行为在日志行解引用 u.Scheme 直接 panic
+	// （且 scheduler goroutine 无 recover 会杀进程）。修复后必须回退直连。
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		return jsonResp(200, `{}`), nil
+	})
+	a := &auth.Auth{AccessToken: "at", UID: "u1", ProxyURL: "http://[::1"}
+	std, stream := c.clientFor(a)
+	if std == nil || stream == nil {
+		t.Fatal("malformed proxy must fall back to DIRECT clients, not panic")
+	}
+	// 同一畸形 URL 走缓存，二次调用同样安全
+	if _, stream2 := c.clientFor(a); stream2 == nil {
+		t.Fatal("cached malformed proxy entry lost")
+	}
+}
