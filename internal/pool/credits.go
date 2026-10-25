@@ -71,6 +71,8 @@ func (p *Pool) CreditHistoryStats() (entries int, oldest, newest int64) {
 
 // PruneCreditHistory 按保留期裁剪轨迹（keepDays：< 0 不动作 / 0 清空 / > 0 保留最近 N 天）。
 func (p *Pool) PruneCreditHistory(keepDays int) (removed, kept int, err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock() // 与 appendCreditLocked 互斥：防 ReadFile→Rename 窗口丢追加行（Windows 下 rename 直接失败）
 	if keepDays < 0 || p.creditFp == "" {
 		return 0, 0, nil
 	}

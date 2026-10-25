@@ -71,8 +71,11 @@ var sessionDeadMarkers = []string{"login", "token 失效", "token invalid", "ses
 // Classify 按 HTTP 状态码 + body 判定错误类别（SPEC §4.3）。
 func Classify(status int, body string) ErrKind {
 	lower := strings.ToLower(body)
-	// 1005 plan 权益不足
-	if strings.Contains(body, `"code":1005`) || (strings.Contains(body, "1005") && strings.Contains(lower, "plan")) {
+	// 1005 plan 权益不足。宽松路径（"1005"+"plan" 共现）只对小报文生效——
+	// 真实权益报文是小 JSON；5xx 回显用户内容的大报文里出现 "1005"+"plan"
+	// 子串（审计实测：git 分支名/文件路径）不应触发 12h 硬冷却（2026-10-25 收紧）。
+	if strings.Contains(body, `"code":1005`) ||
+		(len(body) <= 1024 && strings.Contains(body, "1005") && strings.Contains(lower, "plan")) {
 		return ErrPlanLimit
 	}
 	// session 失效
@@ -370,7 +373,12 @@ func (c *Client) doJSON(req *http.Request, a *auth.Auth) (json.RawMessage, error
 		return nil, err
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	raw, rerr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if rerr != nil {
+		// 响应体中途断流：按传输层错误上报（走出口隔离，不计账号错误），
+		// 不再拿截断 body 去解析出 "parse" 错误错记到账号头上（2026-10-25 修复）。
+		return nil, fmt.Errorf("read response body: %w", rerr)
+	}
 	if resp.StatusCode >= 400 {
 		kind := Classify(resp.StatusCode, string(raw))
 		return nil, &Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200)}
@@ -386,19 +394,106 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 	return c.refreshLocked(a)
 }
 
-// RefreshTokenIfNeeded 仅当 token 在 skew 内即将过期（或已过期）时才刷新，
-// 返回是否真正刷新。持锁内重查，避免并发请求对同一账号重复 ExchangeToken 轮换。
-// 调用方仅在 returned 为 true 时需要 SaveAtomic。
+// RefreshTokenIfNeeded 非阻塞预刷新（聊天热路径专用，2026-10-25 改造）：
+// 网络 IO 在 a.mu 之外执行——旧实现持写锁跨网络往返，上游抖动时该账号全部
+// 取 token 的请求被队头阻塞最长 120s 并串行放大（10-22 事故复盘项）。
+//   - 不需要刷新 / 已有刷新在飞 → (false, nil)，调用方直接用当前 token 继续；
+//   - 刷新成功 → (true, nil)，token 已 CAS 写回（被并发轮抢先则本次结果丢弃，
+//     仍返回 (true, nil)——当前 token 已是新的）；
+//   - 刷新失败 → (false, err)，由调用方按错误类别冷却/换号；标记已清，
+//     旧 refreshToken 保持可重试。
+//
+// 调用方在 true 时负责 SaveAtomic。
 func (c *Client) RefreshTokenIfNeeded(a *auth.Auth, skew time.Duration) (bool, error) {
-	a.Lock()
-	defer a.Unlock()
-	if !a.NeedsRefreshLocked(skew) {
+	snapshotRT, ok := a.BeginRefresh(skew)
+	if !ok {
 		return false, nil
 	}
-	if err := c.refreshLocked(a); err != nil {
+	if err := c.exchangeSnapshot(a, snapshotRT); err != nil {
+		a.EndRefresh()
 		return false, err
 	}
 	return true, nil
+}
+
+// exchangeSnapshot 用 refreshToken 快照执行 ExchangeToken（无锁网络 IO），
+// 成功后 CAS 写回。v3/legacy 分支与 exchangeRequest（持锁强刷路径）同协议，
+// 刻意分开实现以区分两套锁语义：本函数网络期间不持 a.mu。
+func (c *Client) exchangeSnapshot(a *auth.Auth, snapshotRT string) error {
+	host := a.ApiHost
+	if host == "" {
+		host = c.oauthBase()
+	}
+	if c.useExchangeV3() {
+		if proof, perr := c.DeviceCreds.SignDeviceProof(http.MethodPost, EpExchangeV3, c.ClientID, snapshotRT); perr == nil {
+			raw, _ := json.Marshal(map[string]any{
+				"ClientID":     c.ClientID,
+				"ClientSecret": "",
+				"RefreshToken": snapshotRT,
+				"DeviceInfo":   BuildDeviceInfo(a, c.DeviceCreds),
+				"DeviceProof":  proof,
+				"IDEVersion":   IdeVersion,
+			})
+			if req, rerr := http.NewRequest(http.MethodPost, c.ugBase()+EpExchangeV3, bytes.NewReader(raw)); rerr == nil {
+				ExchangeV3Headers(req, a.JWT()) // 无锁语境，读锁快照
+				data, derr := c.doJSON(req, a)
+				if derr == nil && hasExchangeToken(data) {
+					return applyExchange(a, snapshotRT, data)
+				}
+				if derr != nil {
+					log.Printf("exchange v3 failed (%v) — fallback to legacy endpoint", derr)
+				} else {
+					log.Printf("exchange v3 response missing Result.Token — fallback to legacy endpoint")
+				}
+			}
+		} else {
+			log.Printf("exchange v3: device proof unavailable (%v) — legacy endpoint", perr)
+		}
+	}
+	body := map[string]any{
+		"ClientID":     c.ClientID,
+		"RefreshToken": snapshotRT,
+		"ClientSecret": "-",
+		"UserID":       "",
+	}
+	raw, _ := json.Marshal(body)
+	req, err := http.NewRequest(http.MethodPost, host+EpExchange, bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
+	OAuthHeaders(req)
+	data, err := c.doJSON(req, a)
+	if err != nil {
+		return err
+	}
+	return applyExchange(a, snapshotRT, data)
+}
+
+// applyExchange 解析 ExchangeToken 响应并 CAS 写回（无锁语境调用）。
+func applyExchange(a *auth.Auth, snapshotRT string, data []byte) error {
+	var resp struct {
+		Result struct {
+			Token               string `json:"Token"`
+			TokenExpireAt       int64  `json:"TokenExpireAt"`
+			TokenExpireDuration int64  `json:"TokenExpireDuration"`
+			RefreshToken        string `json:"RefreshToken"`
+			RefreshExpireAt     int64  `json:"RefreshExpireAt"`
+		} `json:"Result"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return fmt.Errorf("exchange parse: %w", err)
+	}
+	if resp.Result.Token == "" {
+		return fmt.Errorf("refresh_failed: no token in response — re-login required")
+	}
+	expiresAt := int64(0)
+	if resp.Result.TokenExpireAt > 0 {
+		expiresAt = normalizeExpiresAt(resp.Result.TokenExpireAt)
+	} else if resp.Result.TokenExpireDuration > 0 {
+		expiresAt = time.Now().Add(time.Duration(resp.Result.TokenExpireDuration) * time.Second).Unix()
+	}
+	a.CompleteRefresh(snapshotRT, resp.Result.Token, resp.Result.RefreshToken, expiresAt)
+	return nil
 }
 
 // refreshLocked 是 RefreshToken 的持锁内部实现；调用方必须已持有 a 写锁。
@@ -809,8 +904,12 @@ func (c *Client) CheckinClaim(a *auth.Auth) error {
 		Msg     string `json:"msg"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
-		// HTTP 200 但 body 非 JSON：无法判读，保持旧行为按成功处理
-		return nil
+		// HTTP 200 但 body 非 JSON：空体保持旧行为按成功处理（上游静默成功形态）；
+		// 非空非 JSON（CDN/网关错误页）报可区分错误，不再误记「已签到」。
+		if len(bytes.TrimSpace(data)) == 0 {
+			return nil
+		}
+		return fmt.Errorf("checkin claim: response not json (%s)", truncate(string(data), 80))
 	}
 	if resp.Code != 0 {
 		return fmt.Errorf("checkin claim: code=%d %s", resp.Code, ugMsg(resp.Message, resp.Msg))

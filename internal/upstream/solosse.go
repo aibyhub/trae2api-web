@@ -131,6 +131,12 @@ func scanLine(st *sseState, line string) *SOLOEvent {
 	case strings.HasPrefix(line, "event:"):
 		st.event = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
 	case strings.HasPrefix(line, "data:"):
+		// SSE 规范：同一事件的多行 data 以 LF 连接后再解析。
+		// 旧实现直接首尾拼接会破坏多行 payload 的 JSON（2026-10-25 修正，
+		// 单行事件——当前上游的唯一实测形态——行为不变）。
+		if st.data.Len() > 0 {
+			st.data.WriteByte('\n')
+		}
 		st.data.WriteString(strings.TrimPrefix(line, "data:"))
 	}
 	// 其余（":" 注释行等）无动作忽略——不放空 case 避开 staticcheck SA4017 误报

@@ -80,7 +80,9 @@ type dialTLS struct {
 // 双层握手不做指纹，调用方应回退标准 transport——与 sub2api 同策略）。
 func NewDialTLSContext(base *net.Dialer, proxyURL *url.URL) (func(ctx context.Context, network, addr string) (net.Conn, error), error) {
 	if base == nil {
-		base = &net.Dialer{}
+		// 默认拨号器必须有 TCP 超时：僵尸代理「接受连接不应答」曾可无限挂住
+		// 拨号段（HandshakeTimeout 只包住 utls 握手，2026-10-25 修复）。
+		base = &net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}
 	}
 	d := dialTLS{base: base, proxyURL: proxyURL}
 	if proxyURL != nil {
@@ -102,6 +104,7 @@ func (d dialTLS) DialTLSContext(ctx context.Context, network, addr string) (net.
 	if err != nil {
 		return nil, err
 	}
+	_ = raw.SetDeadline(time.Time{}) // 清除 CONNECT 段 deadline
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		raw.Close()
@@ -182,6 +185,10 @@ func dialHTTPConnect(ctx context.Context, base *net.Dialer, u *url.URL, targetAd
 		conn.Close()
 		return nil, fmt.Errorf("tlsfp: send CONNECT: %w", err)
 	}
+
+	// CONNECT 响应读取同样需要 deadline（该读段在 HTTP 层所有超时之外），
+	// 读完即清除，不影响隧道内的长 SSE 流。
+	_ = conn.SetDeadline(time.Now().Add(15 * time.Second))
 	br := bufio.NewReader(conn)
 	status, err := br.ReadString('\n')
 	if err != nil {

@@ -35,6 +35,10 @@ type Auth struct {
 	EnterpriseID string
 	Nickname     string
 	FilePath     string // 落盘路径；refresh 后原子写回
+
+	// refreshing 非阻塞刷新单飞标记（mu 内访问，仅 BeginRefresh/
+	// CompleteRefresh/EndRefresh 三方法管理；序列化不落盘）。
+	refreshing bool
 }
 
 // Lock 供同进程内其他包（upstream.RefreshToken）在改写 Auth 字段期间加写锁。
@@ -76,6 +80,49 @@ func (a *Auth) NeedsRefresh(within time.Duration) bool {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.NeedsRefreshLocked(within)
+}
+
+// BeginRefresh 非阻塞刷新单飞入口（热路径 RefreshTokenIfNeeded 用）：
+// 不需要刷新（skew 内仍新鲜）或已有刷新在飞 → ("", false)，调用方直接用
+// 当前 token 继续请求（不等待、不报错）；否则标记刷新中并返回 refreshToken 快照。
+// 网络 IO 必须在 a.mu 之外进行，结束后用 CompleteRefresh/EndRefresh 收尾。
+func (a *Auth) BeginRefresh(skew time.Duration) (string, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.refreshing {
+		return "", false
+	}
+	if !a.NeedsRefreshLocked(skew) {
+		return "", false
+	}
+	a.refreshing = true
+	return a.RefreshToken, true
+}
+
+// CompleteRefresh 刷新成功后的 CAS 写回：仅当 refreshToken 自快照以来未被其他
+// 并发刷新轮换过才应用结果（被轮换则丢弃本次结果——并发轮已写入新 token）。
+// 任何路径都清 refreshing 标记。
+func (a *Auth) CompleteRefresh(snapshotRT, accessToken, refreshToken string, expiresAt int64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.refreshing = false
+	if a.RefreshToken != snapshotRT {
+		return
+	}
+	a.AccessToken = accessToken
+	if refreshToken != "" {
+		a.RefreshToken = refreshToken
+	}
+	if expiresAt > 0 {
+		a.ExpiresAt = expiresAt
+	}
+}
+
+// EndRefresh 刷新失败收尾：只清标记，不改凭证（失败路径保证旧 refreshToken 可重试）。
+func (a *Auth) EndRefresh() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.refreshing = false
 }
 
 // NeedsRefreshLocked 是 NeedsRefresh 的持锁内部版本；调用方必须已持有 a.mu（读或写锁）。

@@ -138,7 +138,9 @@ func main() {
 	}
 	go func() {
 		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		// 25s：给进行中的长 SSE 流留排空时间（compose stop_grace_period=30s，
+		// 留 5s 余量给进程收尾）；旧值 5s 会直接切断在途流。
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)
 	}()

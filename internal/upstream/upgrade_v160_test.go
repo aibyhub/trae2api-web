@@ -13,6 +13,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -341,3 +343,131 @@ func TestClientForMalformedProxyNoPanic(t *testing.T) {
 		t.Fatal("cached malformed proxy entry lost")
 	}
 }
+
+// --- 刷新非阻塞化（2026-10-25 热路径改造）---
+
+// TestRefreshIfNeededConcurrentSingleFlight 并发预刷新：网络只发一次，
+// 其余调用立即 (false,nil) 不排队——写锁队头阻塞问题的行为锚定。
+func TestRefreshIfNeededConcurrentSingleFlight(t *testing.T) {
+	var calls int32
+	gate := make(chan struct{})
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		atomic.AddInt32(&calls, 1)
+		<-gate // 第一次网络挂起，窗口内其余调用必须走「在飞 → (false,nil)」
+		return jsonResp(200, `{"Result":{"Token":"new-at","RefreshToken":"new-rt","TokenExpireDuration":86400}}`), nil
+	})
+	a := &auth.Auth{RefreshToken: "old-rt", AccessToken: "old-at", ExpiresAt: time.Now().Unix()} // 已过期
+	const n = 8
+	type res struct {
+		refreshed bool
+		err       error
+	}
+	results := make(chan res, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			refreshed, err := c.RefreshTokenIfNeeded(a, 24*time.Hour)
+			results <- res{refreshed, err}
+		}()
+	}
+	time.Sleep(100 * time.Millisecond) // 让 first 请求挂住、其余人判定「在飞」
+	close(gate)
+	wg.Wait()
+	close(results)
+	total := 0
+	for r := range results {
+		if r.err != nil {
+			t.Fatalf("no caller should error: %v", r.err)
+		}
+		total++
+	}
+	if int32(total) != n {
+		t.Fatalf("expected %d results, got %d", n, total)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("exchange should fire exactly once, got %d", got)
+	}
+	if a.AccessToken != "new-at" || a.RefreshToken != "new-rt" {
+		t.Fatalf("token not applied: %+v", a)
+	}
+}
+
+// TestCompleteRefreshCASDiscardStale 并发轮抢先轮换后，慢轮结果必须丢弃
+// （不允许旧快照覆盖新 token），且 refreshing 标记被清。
+func TestCompleteRefreshCASDiscardStale(t *testing.T) {
+	a := &auth.Auth{RefreshToken: "rt-v1", AccessToken: "at-v1"}
+	if _, ok := a.BeginRefresh(24 * time.Hour); !ok {
+		t.Fatal("begin failed")
+	}
+	// 模拟并发轮已用 rt-v1 换到新 token 并写回
+	a.CompleteRefresh("rt-v1", "at-v2", "rt-v2", time.Now().Add(time.Hour).Unix())
+	// 慢轮（拿着 rt-v1 的结果）迟到 → 必须被丢弃
+	a.CompleteRefresh("rt-v1", "at-SLOW", "rt-SLOW", 0)
+	if a.AccessToken != "at-v2" || a.RefreshToken != "rt-v2" {
+		t.Fatalf("stale result overwrote fresh tokens: %+v", a)
+	}
+	// 标记已清（可以直接再次 BeginRefresh）
+	if _, ok := a.BeginRefresh(24 * time.Hour); !ok {
+		t.Fatal("refreshing flag not cleared after CAS discard")
+	}
+}
+
+// TestBeginRefreshSkipsWhenFresh token 新鲜时不标记不刷新。
+func TestBeginRefreshSkipsWhenFresh(t *testing.T) {
+	a := &auth.Auth{RefreshToken: "rt", ExpiresAt: time.Now().Add(48 * time.Hour).Unix()}
+	if _, ok := a.BeginRefresh(24 * time.Hour); ok {
+		t.Fatal("fresh token should not begin refresh")
+	}
+	if _, ok := a.BeginRefresh(24 * time.Hour); ok {
+		t.Fatal("second begin should also skip")
+	}
+}
+
+// --- Classify 报文体长度门 + doJSON 读错误归类（2026-10-25 稳定性收紧）---
+
+func TestClassifyPlanLimitSizeGate(t *testing.T) {
+	// 小报文：宽松路径仍生效（历史无 "code":1005 锚点的形态）
+	small := `{"message":"plan quota 1005 exceeded"}`
+	if got := Classify(200, small); got != ErrPlanLimit {
+		t.Fatalf("small plan body should classify plan_limit, got %v", got)
+	}
+	// 大报文（5xx 回显用户内容，恰好含 "1005" 与 "plan" 子串）→ 不再误判 12h 硬冷却
+	big := `{"error":"boom","echo":"` + strings.Repeat("x plan 1005 ", 200) + `"}`
+	if got := Classify(500, big); got == ErrPlanLimit {
+		t.Fatal("large echoed body must not classify plan_limit")
+	}
+	if got := Classify(500, big); got != ErrServer {
+		t.Fatalf("large body should stay ErrServer, got %v", got)
+	}
+	// 精确锚不受长度影响
+	if got := Classify(200, `{"code":1005,"msg":"x"}`); got != ErrPlanLimit {
+		t.Fatalf("exact anchor broken: %v", got)
+	}
+}
+
+// TestDoJSONBodyReadErrorIsTransport 响应体中途断流 → 传输层错误（出口隔离路径），
+// 不再变成 "exchange parse" 类账号错误。
+func TestDoJSONBodyReadErrorIsTransport(t *testing.T) {
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: 200,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(&errReader{}),
+		}, nil
+	})
+	a := &auth.Auth{AccessToken: "at", RefreshToken: "rt", ExpiresAt: 1}
+	err := c.CheckinClaim(a)
+	if err == nil {
+		t.Fatal("mid-body read error should surface")
+	}
+	if !IsTransportError(err) {
+		t.Fatalf("read error should classify as transport: %v", err)
+	}
+}
+
+type errReader struct{}
+
+func (errReader) Read(p []byte) (int, error) { return 0, io.ErrUnexpectedEOF }
+func (errReader) Close() error               { return nil }
