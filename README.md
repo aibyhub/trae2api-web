@@ -260,6 +260,9 @@ curl -X POST http://127.0.0.1:7864/v1/chat/completions \
 | `TW2A_TIMEOUT_SECONDS` | `120` | 上游请求超时时长（秒） |
 | `TW2A_ERR_THRESHOLD` | `3` | 触发冷却前的连续错误次数 |
 | `TW2A_ERR_COOLDOWN` | `300` | 错误冷却时长（秒） |
+| `TW2A_EXCHANGE_V3` | (空) | ExchangeToken v3 开关（`1`/`true` 开启）：走 `/trae/api/v3/oauth/ExchangeToken` + 设备证明（EC P-256 签名，密钥落盘 `data/device-key.json`）。旧端点当前仍工作，默认关；开启后如设备密钥缺失自动回退旧端点 |
+| `TW2A_TLS_FINGERPRINT` | `1` | 出站 TLS 指纹复刻开关；`0`/`false` 关闭回退 Go 标准栈（诊断用） |
+| `TW2A_PROXY_URL` | (空) | 全局兜底代理（账号 `proxyUrl` 优先）；支持 http/https/socks5(h) |
 
 ## 常见问题排查
 

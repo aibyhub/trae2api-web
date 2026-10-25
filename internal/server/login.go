@@ -11,6 +11,8 @@ package server
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"net/http"
@@ -38,12 +40,29 @@ type pendingLogin struct {
 	deviceID    string
 	callbackURL string // auth_callback_url（含端口）
 	createdAt   time.Time
+	// PKCE（2026-10 真机 1.107.1 登录页已带 code_challenge）：verifier 随 pending
+	// 保存，当前回调直接回传 token 用不到它；若上游切到 auth-code 换 token，
+	// verifier 需随 ExchangeToken 提交，先备着（与真机 QDe() 同构）。
+	codeVerifier  string
+	codeChallenge string
 
 	// success 时填
 	uid      string
 	nickname string
 	// failed 时填
 	errMsg string
+}
+
+// pkcePair 生成 PKCE code_verifier（48 随机字节 base64url）与 S256 challenge。
+func pkcePair() (verifier, challenge string, err error) {
+	b := make([]byte, 48)
+	if _, err = rand.Read(b); err != nil {
+		return "", "", err
+	}
+	verifier = base64.RawURLEncoding.EncodeToString(b)
+	sum := sha256.Sum256([]byte(verifier))
+	challenge = base64.RawURLEncoding.EncodeToString(sum[:])
+	return verifier, challenge, nil
 }
 
 // loginStartResponse POST /admin/api/login 返回。
@@ -84,7 +103,12 @@ func (h *Handler) adminLoginStart(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusInternalServerError, "rand_failed", err.Error())
 		return
 	}
-	loginURL := BuildLoginURL(machineID, deviceID, callbackURL)
+	verifier, challenge, err := pkcePair()
+	if err != nil {
+		writeOpenAIError(w, http.StatusInternalServerError, "rand_failed", err.Error())
+		return
+	}
+	loginURL := BuildLoginURL(machineID, deviceID, callbackURL, challenge)
 
 	pendingID, err := randomHex(8) // hex16
 	if err != nil {
@@ -92,11 +116,13 @@ func (h *Handler) adminLoginStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pl := &pendingLogin{
-		state:       pendingStateActive,
-		machineID:   machineID,
-		deviceID:    deviceID,
-		callbackURL: callbackURL,
-		createdAt:   time.Now(),
+		state:         pendingStateActive,
+		machineID:     machineID,
+		deviceID:      deviceID,
+		callbackURL:   callbackURL,
+		createdAt:     time.Now(),
+		codeVerifier:  verifier,
+		codeChallenge: challenge,
 	}
 	h.loginMu.Lock()
 	h.logins[pendingID] = pl

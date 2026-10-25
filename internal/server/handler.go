@@ -350,15 +350,22 @@ var staticModels = []map[string]any{
 	{"id": "DeepSeek-V4-Flash-Official", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
 	{"id": "browser_use_subagent", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
 	{"id": "glm-5.2", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
+	{"id": "glm-5.1", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
 	{"id": "glm-5-turbo", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
 	{"id": "glm-5", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
 	{"id": "DeepSeek-V4-Pro", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
 	{"id": "DeepSeek-V4-Flash", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
+	{"id": "DeepSeek-V3.1", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
 	{"id": "kimi-k3", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
 	{"id": "kimi-k2.7-code", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
 	{"id": "kimi-k2.6", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
+	{"id": "kimi-k2.5", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
 	{"id": "minimax-m3", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
+	{"id": "minimax-m2.7", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
+	{"id": "minimax-m2.5", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
 	{"id": "qwen-3.7-plus", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
+	{"id": "qwen-3.6-plus", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
+	{"id": "qwen-3.5", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
 	{"id": "sagitta", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
 	{"id": "aquila", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
 	{"id": "custom_model_gemini", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
@@ -381,6 +388,14 @@ var staticModels = []map[string]any{
 	{"id": "deepseek-v4.1-flash", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
 	{"id": "mimo-v2.6-pro", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
 	{"id": "mimo-v2.6-flash", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
+	// ---- 2026-10 客户端 1.107.1 逆向补齐（DLL 模型清单 vs 本表缺口，
+	// docs/RESEARCH-CLIENT-REVERSE.md §5）：glm-5v-turbo、qwen3.8 系、
+	// seed-2.1-pro-evolving。DLL 原样大小写收录，真实 config_name 形态未实测，
+	// 最终可用性由动态菜单/上游裁决。----
+	{"id": "glm-5v-turbo", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
+	{"id": "qwen3.8-flash", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
+	{"id": "qwen3.8-max", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
+	{"id": "seed-2.1-pro-evolving", "object": "model", "created": 1753600000, "owned_by": "trae-solo", "context_length": 131072},
 }
 
 // dynamicModelsCache 动态模型菜单缓存（2026-10-22 口径改版）：

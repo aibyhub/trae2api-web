@@ -64,6 +64,13 @@ func main() {
 	if tr, ok := up.StreamHTTP.Transport.(*http.Transport); ok {
 		tr.ResponseHeaderTimeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	}
+	// 设备密钥对（ExchangeToken v3 DeviceProof 用，TW2A_EXCHANGE_V3 开关）：
+	// 安装级一份（data/device-key.json），加载失败不致命——v3 自动回退旧端点。
+	if dc, dcErr := upstream.LoadOrCreateDeviceCredentials(filepath.Join(filepath.Dir(cfg.StateFile), "device-key.json")); dcErr == nil {
+		up.DeviceCreds = dc
+	} else {
+		log.Printf("device key load failed (exchange v3 disabled): %v", dcErr)
+	}
 
 	checkinHours := cfg.Schedule.CheckinHours
 	if len(checkinHours) == 0 {

@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"trae2api-web/internal/upstream"
 )
 
 // 构造一个合法回调 URL（query 已 percent-encode，复刻浏览器真实回调形态）。
@@ -155,8 +157,9 @@ func TestBuildLoginURL(t *testing.T) {
 	machineID := "abcdef0123456789abcdef0123456789"
 	deviceID := "0123456789abcdef0123456789abcdef"
 	cb := "http://127.0.0.1:7864/authorize"
+	challenge := "38b2caa7067bd2e8e5a8c13b577a9d1f2c1f6a9f57a96e0cb2f3e5a1d0b9c8e7"
 
-	u := BuildLoginURL(machineID, deviceID, cb)
+	u := BuildLoginURL(machineID, deviceID, cb, challenge)
 	if !strings.HasPrefix(u, "https://www.trae.cn/authorization?") {
 		t.Fatalf("url prefix wrong: %s", u)
 	}
@@ -178,6 +181,12 @@ func TestBuildLoginURL(t *testing.T) {
 		"x_device_brand":    "PC",
 		"x_device_type":     "PC",
 		"auth_callback_url": cb,
+		// 2026-10 真机 1.107.1 对齐：plugin_version 取 tronBuildVersion，
+		// PKCE S256 参数与 hide_saas_login 固定追加。
+		"plugin_version":        upstream.TronBuildVersion,
+		"code_challenge":        challenge,
+		"code_challenge_method": "S256",
+		"hide_saas_login":       "true",
 	}
 	for k, want := range checks {
 		if got := q.Get(k); got != want {

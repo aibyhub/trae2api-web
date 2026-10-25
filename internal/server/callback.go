@@ -25,15 +25,24 @@ const loginTraceIDHexLen = 16
 // BuildLoginURL 构造 TRAE 登录 URL（复刻 login.sh 的参数集）。
 // callbackURL 是 TRAE 登录成功后的重定向落点（如 http://127.0.0.1:7864/authorize）。
 // machineID/deviceID 必须与落盘 auth 文件共用同一对（hex32），保证登录态与凭证一致。
-func BuildLoginURL(machineID, deviceID, callbackURL string) string {
+// codeChallenge 非空时附带 PKCE 参数（code_challenge/code_challenge_method=S256，
+// 2026-10 真机 1.107.1 buildLoginUrl 已带；回调直接回传 token 的链路用不到
+// verifier，留参数只为对齐真机登录页指纹）。
+func BuildLoginURL(machineID, deviceID, callbackURL, codeChallenge string) string {
 	v := url.Values{}
 	v.Set("login_version", "1")
 	v.Set("auth_from", "solo")
 	v.Set("login_channel", "native_ide")
-	v.Set("plugin_version", "2.3.62834")
+	v.Set("plugin_version", upstream.TronBuildVersion)
 	v.Set("auth_type", "local")
 	v.Set("client_id", upstream.ClientID)
 	v.Set("redirect", "0")
+	if codeChallenge != "" {
+		v.Set("code_challenge", codeChallenge)
+		v.Set("code_challenge_method", "S256")
+	}
+	// hide_saas_login=true：真机 solo 通道（auth_from=solo）固定追加，隐藏 SaaS 登录入口。
+	v.Set("hide_saas_login", "true")
 	// login_trace_id：随机性由调用方注入（time 不可用，见 newLoginTraceID）；
 	// 这里只负责拼装，调用方传入已生成的 trace id。
 	return upstream.ConsoleHost + "/authorization?" + v.Encode() +

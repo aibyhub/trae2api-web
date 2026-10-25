@@ -51,7 +51,7 @@ params = {
     "login_version": "1",
     "auth_from": "solo",
     "login_channel": "native_ide",
-    "plugin_version": "2.3.62834",
+    "plugin_version": "2.3.82597",
     "auth_type": "local",
     "client_id": os.environ["CLIENT_ID"],
     "redirect": "0",

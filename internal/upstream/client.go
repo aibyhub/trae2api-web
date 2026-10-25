@@ -112,6 +112,11 @@ type Client struct {
 	OAuthHost string // https://api.trae.com.cn
 	ClientID  string // en1oxy7wnw8j9n
 
+	// DeviceCreds 安装级设备密钥对（ExchangeToken v3 DeviceProof 用）。
+	// nil = v3 不可用（TW2A_EXCHANGE_V3 开启时也回退旧端点）。
+	// 由 cmd/server 启动时 LoadOrCreateDeviceCredentials(data/device-key.json) 装配。
+	DeviceCreds *DeviceCredentials
+
 	// proxyClients 按代理 URL 缓存的客户端对（std/stream），支撑每账号独立出口。
 	proxyClients sync.Map // string → *proxyPair
 }
@@ -388,13 +393,11 @@ func (c *Client) RefreshTokenIfNeeded(a *auth.Auth, skew time.Duration) (bool, e
 
 // refreshLocked 是 RefreshToken 的持锁内部实现；调用方必须已持有 a 写锁。
 // 任何失败路径都不改写 a 字段，保证旧 refreshToken 可重试。
+// TW2A_EXCHANGE_V3=1 且设备密钥可用时走 v3 端点（/trae/api/v3/oauth/ExchangeToken
+// + DeviceProof 签名，2026-10 真机 1.107.1 口径）；否则走旧端点（当前仍工作）。
 func (c *Client) refreshLocked(a *auth.Auth) error {
 	if strings.TrimSpace(a.RefreshToken) == "" {
 		return fmt.Errorf("no refreshToken")
-	}
-	host := a.ApiHost
-	if host == "" {
-		host = c.oauthBase()
 	}
 	body := map[string]any{
 		"ClientID":     c.ClientID,
@@ -402,8 +405,29 @@ func (c *Client) refreshLocked(a *auth.Auth) error {
 		"ClientSecret": "-",
 		"UserID":       "",
 	}
+	ep := EpExchange
+	host := a.ApiHost
+	if host == "" {
+		host = c.oauthBase()
+	}
+	if c.useExchangeV3() {
+		proof, err := c.DeviceCreds.SignDeviceProof(http.MethodPost, EpExchangeV3, c.ClientID, a.RefreshToken)
+		if err != nil {
+			log.Printf("exchange v3: device proof unavailable (%v) — fallback to legacy endpoint", err)
+		} else {
+			body = map[string]any{
+				"ClientID":     c.ClientID,
+				"ClientSecret": "",
+				"RefreshToken": a.RefreshToken,
+				"DeviceInfo":   BuildDeviceInfo(a, c.DeviceCreds),
+				"DeviceProof":  proof,
+				"IDEVersion":   IdeVersion,
+			}
+			ep = EpExchangeV3
+		}
+	}
 	raw, _ := json.Marshal(body)
-	req, err := http.NewRequest(http.MethodPost, host+EpExchange, bytes.NewReader(raw))
+	req, err := http.NewRequest(http.MethodPost, host+ep, bytes.NewReader(raw))
 	if err != nil {
 		return err
 	}
@@ -438,6 +462,11 @@ func (c *Client) refreshLocked(a *auth.Auth) error {
 		a.ExpiresAt = time.Now().Add(time.Duration(resp.Result.TokenExpireDuration) * time.Second).Unix()
 	}
 	return nil
+}
+
+// useExchangeV3 v3 端点是否可用：开关开启且设备密钥已装配。
+func (c *Client) useExchangeV3() bool {
+	return exchangeV3Enabled() && c.DeviceCreds != nil
 }
 
 // normalizeExpiresAt 把 ExchangeToken 的 TokenExpireAt 归一化为 Unix 秒。
@@ -493,8 +522,8 @@ type ModelInfo struct {
 	Invisible     bool    // is_invisible_to_user：内部模型（subagent 等），客户端模型列表不展示
 }
 
-// FetchModels 拉 SOLO 模型表（get_detail_param，32 配置）。
-func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
+// fetchModelsOnce 对指定菜单端点发一次请求并解析 config_info_list。
+func (c *Client) fetchModelsOnce(a *auth.Auth, ep string) ([]ModelInfo, error) {
 	body := map[string]any{
 		"function":            Function,
 		"config_names":        nil,
@@ -505,7 +534,7 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 		"agent_type":          nil,
 	}
 	raw, _ := json.Marshal(body)
-	req, err := http.NewRequest(http.MethodPost, c.agentBase()+EpModels, bytes.NewReader(raw))
+	req, err := http.NewRequest(http.MethodPost, c.agentBase()+ep, bytes.NewReader(raw))
 	if err != nil {
 		return nil, err
 	}
@@ -529,6 +558,10 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 			ModelDetailList      []struct {
 				ModelName string `json:"model_name"`
 			} `json:"model_detail_list"`
+			// ContextWindowSize 2026-10 客户端 1.107.1 模型配置新增
+			// context_window_size（DLL 结构体实锤）；旧端点不下发时保持 0，
+			// 调用方（acceptListNoFetch）自行回退 131072。
+			ContextWindowSize int64 `json:"context_window_size"`
 		} `json:"config_info_list"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
@@ -554,18 +587,32 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 			}
 		}
 		out = append(out, ModelInfo{
-			ID:        cfg.ConfigName,
-			Name:      cfg.DisplayConfig.DisplayName,
-			Rate:      rate,
-			FeeLevel:  cfg.DisplayConfig.FeeModelLevel,
-			Custom:    cfg.IsCustomModel,
-			Invisible: cfg.Invisible,
+			ID:            cfg.ConfigName,
+			Name:          cfg.DisplayConfig.DisplayName,
+			ContextWindow: cfg.ContextWindowSize,
+			Rate:          rate,
+			FeeLevel:      cfg.DisplayConfig.FeeModelLevel,
+			Custom:        cfg.IsCustomModel,
+			Invisible:     cfg.Invisible,
 		})
 	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("models api returned empty list")
 	}
 	return out, nil
+}
+
+// FetchModels 拉 SOLO 模型表。
+// 2026-10 真机 1.107.1 主力端点为 batch_get_detail_param（会话日志 155 次命中，
+// 旧 get_detail_param 零命中），但 batch 的请求/响应 schema 未逐字段验证——
+// 先试 batch，任何失败（HTTP 错误/解析失败/空表）回退旧端点，行为兜底不变。
+func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
+	infos, batchErr := c.fetchModelsOnce(a, EpModelsBatch)
+	if batchErr == nil {
+		return infos, nil
+	}
+	log.Printf("models: batch endpoint failed (%v) — fallback to %s", batchErr, EpModels)
+	return c.fetchModelsOnce(a, EpModels)
 }
 
 // ugCheckinBody status/claim 的请求体。

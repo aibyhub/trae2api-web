@@ -229,9 +229,12 @@ func TestModelsEndpoint(t *testing.T) {
 		t.Errorf("object=%v", resp["object"])
 	}
 	data := resp["data"].([]any)
-	// 静态兜底表 = 32 个 config_name + 5 条 OpenAI 风格别名（2026-10-22 追加）。
-	if len(data) != 37 {
-		t.Errorf("models count=%d want 37", len(data))
+	// 静态兜底表 = 32 个 config_name + 5 条 OpenAI 风格别名（2026-10-22）
+	// + 11 条 1.107.1 逆向补齐（2026-10-25：glm-5.1/5v-turbo、DeepSeek-V3.1、
+	// kimi-k2.5、minimax-m2.5/2.7、qwen-3.5/3.6-plus、qwen3.8-flash/max、
+	// seed-2.1-pro-evolving，见 docs/RESEARCH-CLIENT-REVERSE.md §5）。
+	if len(data) != 48 {
+		t.Errorf("models count=%d want 48", len(data))
 	}
 	found := false
 	aliasFound := false
