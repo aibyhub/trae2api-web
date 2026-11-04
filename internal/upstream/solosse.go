@@ -337,7 +337,6 @@ func streamOpts(w http.ResponseWriter, r io.Reader, model string, onErr func(*SO
 	br := bufio.NewReaderSize(r, 64*1024)
 	id := fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano())
 	var pendingUsage map[string]any
-	sawDone := false
 	st := &sseState{}
 	writeChunk := func(delta map[string]any, finish string) error {
 		chunk := map[string]any{
@@ -426,15 +425,21 @@ func streamOpts(w http.ResponseWriter, r io.Reader, model string, onErr func(*SO
 					onUsage(ev.Usage)
 				}
 			case "done":
+				// done 即终态：写完终块+[DONE]立即返回，不再等上游 EOF。
+				// 若继续读，下游（new-api）收到 [DONE] 断连 → r.Context() 取消 →
+				// 挂着的上游读返回 context canceled → 被记成假错误「上游流中断:
+				// context canceled」（2026-11-02 实测 3/56，与上游 EOF 赛跑）。
+				// 事件序保证 usage 恒在 done 前（SPEC §4.6），早退不丢计费。
 				if err := writeChunk(map[string]any{}, ev.FinishReason); err != nil {
 					return err
 				}
 				if err := writeDONE(); err != nil {
 					return err
 				}
-				sawDone = true
+				return nil
 			case "error":
-				// 上游业务错误：回调 + 写一条 error 事件 + [DONE]。
+				// 业务错误同样终态：回调 + error 事件 + [DONE] 后立即返回
+				//（返回 nil 保住 onErr 设的 streamErrMsg，避免被「上游流中断」覆盖）。
 				se := &SOLOStreamError{Code: ev.ErrorCode, Msg: ev.ErrorMessage}
 				if onErr != nil {
 					onErr(se)
@@ -446,18 +451,15 @@ func streamOpts(w http.ResponseWriter, r io.Reader, model string, onErr func(*SO
 				if err := writeDONE(); err != nil {
 					return err
 				}
-				sawDone = true
+				return nil
 			}
 		}
 		if err == io.EOF {
 			break
 		}
 	}
-	if !sawDone {
-		// 幂等兜底：上游中断（无 done）仍写 [DONE]。
-		return writeDONE()
-	}
-	return nil
+	// 幂等兜底：上游无 done/error 即中断（循环仅在 EOF 到达此处）仍写 [DONE]。
+	return writeDONE()
 }
 
 func jsonEscape(s string) string {

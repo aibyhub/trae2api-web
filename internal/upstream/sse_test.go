@@ -1,7 +1,9 @@
 package upstream
 
 import (
+	"context"
 	"encoding/json"
+	"io"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -212,6 +214,76 @@ func TestStreamGuaranteesDone(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "data: [DONE]") {
 		t.Errorf("missing [DONE]: %q", rec.Body.String())
+	}
+}
+
+// --- 回归：done/error 终态早退（2026-11-02 假错误修复） ---
+//
+// 下游（new-api）收到 [DONE] 即断连 → r.Context() 取消 → 上游读返回
+// context canceled。done/error 之后必须立即 return，不得再等上游 EOF，
+// 否则与取消赛跑，成功调用被记成「上游流中断: context canceled」。
+
+// errAfterReader 放完 data 后恒返回 err（模拟下游断连后的取消读）。
+type errAfterReader struct {
+	data io.Reader
+	err  error
+}
+
+func (e *errAfterReader) Read(p []byte) (int, error) {
+	n, err := e.data.Read(p)
+	if err != nil {
+		return n, e.err
+	}
+	return n, nil
+}
+
+func TestStreamReturnsAtDoneBeforeContextCancel(t *testing.T) {
+	rec := httptest.NewRecorder()
+	r := &errAfterReader{data: strings.NewReader(soloSSEFixture), err: context.Canceled}
+	if err := Stream(rec, r); err != nil {
+		t.Fatalf("done 后的取消读必须被早退吞掉, got %v", err)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "data: [DONE]") {
+		t.Errorf("missing [DONE]: %q", body)
+	}
+	if !strings.Contains(body, `"finish_reason":"stop"`) {
+		t.Errorf("missing final chunk: %q", body)
+	}
+	if !strings.Contains(body, `"total_tokens":163`) {
+		t.Errorf("usage must attach to final chunk before done: %q", body)
+	}
+}
+
+func TestStreamReturnsAtErrorBeforeContextCancel(t *testing.T) {
+	var got *SOLOStreamError
+	raw := "event:error\ndata:{\"code\":1005,\"message\":\"plan limit\"}\n\n" +
+		"event:done\ndata:{\"finish_reason\":\"stop\"}\n\n"
+	rec := httptest.NewRecorder()
+	r := &errAfterReader{data: strings.NewReader(raw), err: context.Canceled}
+	if err := StreamWithError(rec, r, func(se *SOLOStreamError) { got = se }); err != nil {
+		t.Fatalf("error 终态后的取消读必须早退, got %v", err)
+	}
+	if got == nil || got.Code != 1005 {
+		t.Fatalf("onErr not called: %+v", got)
+	}
+	body := rec.Body.String()
+	if n := strings.Count(body, "data: [DONE]"); n != 1 {
+		t.Errorf("want exactly one [DONE], got %d: %q", n, body)
+	}
+	if strings.Contains(body, `"finish_reason":"stop"`) {
+		t.Errorf("error 后的 done 不得再写 chunk: %q", body)
+	}
+}
+
+func TestStreamMidStreamInterruptStillErrors(t *testing.T) {
+	rec := httptest.NewRecorder()
+	r := &errAfterReader{
+		data: strings.NewReader("event:output\ndata:{\"response\":\"x\",\"reasoning_content\":\"\",\"tool_calls\":null}\n\n"),
+		err:  context.Canceled,
+	}
+	if err := Stream(rec, r); err == nil {
+		t.Fatal("done 前的读中断必须仍返回错误（否则真故障被静默记 ok）")
 	}
 }
 
