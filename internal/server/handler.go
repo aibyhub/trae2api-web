@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"math/rand"
+	"net"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -78,10 +79,13 @@ type Config struct {
 	Prompt PromptConfig
 	// SanitizeFingerprints 出站请求体黑名单指纹清洗开关（默认 true）。
 	SanitizeFingerprints bool
+	// MaxBodyMB 聊天请求体大小上限（MB），超过返回 413；<=0 = 默认 48。
+	MaxBodyMB int
 }
 
-// maxBodyBytes 请求体大小上限（8MB），超过返回 413。
-const maxBodyBytes = 8 << 20
+// defaultMaxBodyMB 请求体大小上限默认值（MB）。2026-11-12 由 8MB 提升：
+// 长上下文/大工具返回的请求体常见 10~40MB，8MB 在 trae2api 层先被 413。
+const defaultMaxBodyMB = 48
 
 // Handler 主路由。
 type Handler struct {
@@ -147,6 +151,9 @@ func NewHandler(cfg Config) *Handler {
 	}
 	if cfg.DataDir == "" {
 		cfg.DataDir = "data"
+	}
+	if cfg.MaxBodyMB <= 0 {
+		cfg.MaxBodyMB = defaultMaxBodyMB
 	}
 	if strings.TrimSpace(cfg.Prompt.Mode) == "" {
 		cfg.Prompt.Mode = "auto"
@@ -585,13 +592,15 @@ func stripReasoningParams(body []byte) []byte {
 }
 
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
+	maxBody := int64(h.cfg.MaxBodyMB) << 20
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "read body: "+err.Error())
 		return
 	}
-	if len(body) > maxBodyBytes {
-		writeOpenAIError(w, http.StatusRequestEntityTooLarge, "request_too_large", "request body exceeds 8MB limit")
+	if int64(len(body)) > maxBody {
+		writeOpenAIError(w, http.StatusRequestEntityTooLarge, "request_too_large",
+			fmt.Sprintf("request body exceeds %dMB limit", h.cfg.MaxBodyMB))
 		return
 	}
 	var peek struct {
@@ -675,6 +684,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	tried := map[string]bool{}
 	var lastErr error
 	var hangNoted bool // 本请求是否已给模型挂死观察窗记过一笔（双账号同轮失败只计一次）
+	var canceled bool  // 下游客户端已断开（context canceled）：不是出口故障，不惩罚账号/不熔断
 
 	// 流式请求：先把 SSE 头 + 首个心跳注释发给客户端，再进轮换。
 	// 之后上游首字节慢（120s 头等待悬挂）时客户端已拿 200 且线上有心跳流动，
@@ -712,6 +722,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for i := 0; i < h.cfg.MaxRotate; i++ {
+		if clientGone(r) {
+			// 客户端在轮换间隙断开：立即止损，后面的尝试只会拿着已取消的 ctx 秒失败。
+			lastErr = r.Context().Err()
+			canceled = true
+			break
+		}
 		if !rotateDeadline.IsZero() && time.Now().After(rotateDeadline) {
 			lastErr = fmt.Errorf("upstream slow episode: rotation budget (%v) exhausted before any upstream data", rotateBudget)
 			log.Printf("chat rotation: budget exhausted (%.0fs), stop rotating", rotateBudget.Seconds())
@@ -750,6 +766,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		rc, status, respBody, terr := h.cfg.Upstream.ChatStream(r.Context(), acct, body)
 		if terr != nil {
 			lastErr = terr
+			if clientGone(r) {
+				// 下游断开（客户端超时/主动取消）→ context canceled 不是出口故障：
+				// 不隔离账号、不轮换、不计模型挂死熔断（2026-11-12 误熔断实证）。
+				canceled = true
+				break
+			}
 			if upstream.IsTransportError(terr) {
 				// 出口/网络故障（代理不可达、连接被重置、畸形响应…）不是账号的问题：
 				// 不累计 errCount（否则出口抖一下就把好账号冷却甚至禁用），只把该出口临时隔离，
@@ -760,7 +782,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				record("error", "出口/网络故障: "+shortErr(terr))
 				// 模型级挂死观察窗：每请求记一笔（传输故障按请求去重，避免双账号
 				// 同轮双计；账号轮换对「上游管道黑溺」无解，跨请求累计到阈值即熔断）。
-				if !hangNoted {
+				// 只收「挂死型」故障（超时/等首字节超时）：握手 EOF、连接被拒这类
+				// 快速失败由轮换即时消化，不该把整模型 503 五分钟（2026-11-12 实证）。
+				if !hangNoted && isStallErr(terr) {
 					hangNoted = true
 					h.noteModelHang(configName)
 				}
@@ -822,13 +846,20 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			rc.Close()
 			// 流读取中断要落账并给终态（此前 err 被丢弃：上游冻结/断连会静默记成
 			// "ok" + 0 token——「空心流」假阳性，正是 2026-10-22 复盘的实证之一）。
+			canceledStream := false
 			switch {
+			case streamErr != nil && clientGone(r):
+				// 下游断开导致的读/写失败：不是上游流故障，单独记「客户端取消」。
+				canceledStream = true
+				record("canceled", "客户端断开（下游取消）: "+shortErr(streamErr))
 			case idleW != nil && idleW.Killed() && streamErr != nil:
 				streamErrMsg = fmt.Sprintf("上游流内冻结（%v 无新事件，看门狗断流）: %v", h.cfg.StreamIdleTimeout, shortErr(streamErr))
 			case streamErr != nil:
 				streamErrMsg = "上游流中断: " + shortErr(streamErr)
 			}
-			if streamErrMsg != "" {
+			if canceledStream {
+				// 连接已死，终态写不出去，直接收尾。
+			} else if streamErrMsg != "" {
 				record("error", streamErrMsg)
 				if sw != nil {
 					// 流头已提交：终态以流内 error 事件 + [DONE] 收尾（客户端可见失败）。
@@ -843,6 +874,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		resp, err := upstream.Aggregate(rc, configName)
 		rc.Close() // 已完全消费，立即释放上游连接（防轮转 continue 泄漏 body）
 		if err != nil {
+			if clientGone(r) {
+				record("canceled", "客户端断开（下游取消）: "+shortErr(err))
+				return
+			}
 			// 看门狗断流（非流式大响应中途冻结）→ 视作出口故障：换号重试不受
 			// 「业务流错误不轮换」限制，且不累计账号错误。
 			if idleW != nil && idleW.Killed() {
@@ -885,6 +920,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		record("ok", "")
 		h.noteModelOK(configName)
 		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+	if canceled {
+		record("canceled", "客户端断开（下游取消）: "+shortErr(lastErr))
 		return
 	}
 	msg := "all accounts unavailable (cooling/disabled)"
@@ -1024,4 +1063,32 @@ func writeOpenAIError(w http.ResponseWriter, status int, code, msg string) {
 			"code":    code,
 		},
 	})
+}
+
+// clientGone 下游客户端是否已断开（请求上下文取消/超时）。
+// 用户主动停止、客户端超时、nginx/服务端关停都会让 r.Context() 进入 Done 态；
+// 由此产生的 context canceled 必须与「出口/网络故障」区分开，否则会把好账号
+// 连续隔离、甚至把模型熔断 5 分钟（2026-11-12 生产误熔断复盘）。
+func clientGone(r *http.Request) bool {
+	return r.Context().Err() != nil
+}
+
+// isStallErr 传输故障是否属于「挂死型」（等首字节超时、读写超时、上下文超时）。
+// 握手 EOF / 连接被拒这类快速失败会由轮换即时消化，不参与模型级挂死熔断，
+// 否则一阵出口抖动（如 TLS 握手 EOF）就会把整模型 503 五分钟。
+func isStallErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	for _, m := range []string{"timeout", "deadline exceeded", "awaiting response headers"} {
+		if strings.Contains(msg, m) {
+			return true
+		}
+	}
+	return false
 }

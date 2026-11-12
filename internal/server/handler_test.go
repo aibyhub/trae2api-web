@@ -286,8 +286,8 @@ func TestAPIKeyAuth(t *testing.T) {
 }
 
 func TestRequestBodyTooLarge(t *testing.T) {
-	h := NewHandler(Config{Pool: testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999}), Upstream: upstream.New()})
-	big := strings.Repeat("a", maxBodyBytes+1)
+	h := NewHandler(Config{Pool: testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999}), Upstream: upstream.New(), MaxBodyMB: 8})
+	big := strings.Repeat("a", (8<<20)+1)
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(big))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -298,6 +298,21 @@ func TestRequestBodyTooLarge(t *testing.T) {
 	json.Unmarshal(rec.Body.Bytes(), &e)
 	if e["error"] == nil {
 		t.Errorf("want error envelope: %s", rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), "8MB limit") {
+		t.Errorf("want dynamic 8MB message: %s", rec.Body)
+	}
+}
+
+// 2026-11-12：默认上限 48MB——9MB 请求体不得再被 413（旧 8MB 固定上限回归锚定）。
+func TestRequestBodyAboveOldLimitAccepted(t *testing.T) {
+	h := NewHandler(Config{Pool: testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at", ExpiresAt: 9999999999}), Upstream: upstream.New()})
+	big := strings.Repeat("a", (8<<20)+1)
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(big))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code == http.StatusRequestEntityTooLarge {
+		t.Errorf("9MB body should pass size gate under default 48MB, got 413: %s", rec.Body)
 	}
 }
 

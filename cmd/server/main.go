@@ -113,6 +113,7 @@ func main() {
 
 		LogRetentionDays: cfg.LogRetentionDays, // 日志保留天数（0 = 关闭自动清理）
 		CallRetentionMB:  cfg.CallRetentionMB,  // 调用明细容量上限（0 = 不限量）
+		MaxBodyMB:        cfg.MaxBodyMB,        // 聊天请求体上限（默认 48MB）
 
 		StreamIdleTimeout: time.Duration(cfg.Upstream.StreamIdleTimeoutSeconds) * time.Second, // 流内空闲看门狗（默认 120s）
 	})

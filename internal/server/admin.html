@@ -1185,7 +1185,7 @@ function renderCreditChart(list){
 }
 /* 错误透视：分类聚合（kind 中文映射在前端，方便改词不改协议） */
 const errKindCN = {
-  call_failed:'工具/参数被上游拒绝', rate_limited:'限流/429/冷却', all_unavailable:'全号不可用（轮换耗尽）',
+  canceled:'客户端取消（下游断开）', call_failed:'工具/参数被上游拒绝', rate_limited:'限流/429/冷却', all_unavailable:'全号不可用（轮换耗尽）',
   timeout:'超时', network:'网络/出口', upstream_5xx:'上游 5xx', auth:'鉴权/会话失效', parse:'解析异常', other:'其他'
 };
 function renderErrs(list){

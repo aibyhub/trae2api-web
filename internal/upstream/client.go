@@ -637,7 +637,12 @@ func (c *Client) ChatStream(ctx context.Context, a *auth.Auth, body []byte) (rc 
 	}
 	resp, err := hc.Do(req)
 	if err != nil {
-		log.Printf("chat_stream uid=%s: transport error: %v", a.UID, err)
+		if ctx.Err() != nil {
+			// 下游断开（客户端取消/超时）→ context canceled：不是出口故障，日志分开记。
+			log.Printf("chat_stream uid=%s: client gone: %v", a.UID, err)
+		} else {
+			log.Printf("chat_stream uid=%s: transport error: %v", a.UID, err)
+		}
 		return nil, 0, nil, err
 	}
 	if resp.StatusCode >= 400 {

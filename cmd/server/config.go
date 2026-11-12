@@ -59,6 +59,9 @@ type Config struct {
 	// CallRetentionMB 调用明细（data/call-details）容量封顶：默认 1536（1.5GiB）、
 	// 超限时从最老日期文件开始删（当日在写文件除外）；0 = 关闭容量限制。
 	CallRetentionMB int `json:"call_retention_mb"`
+	// MaxBodyMB 聊天请求体大小上限（MB），默认 48（env TW2A_MAX_BODY_MB）。
+	// 2026-11-12 由固定 8MB 提升：长上下文请求体常见 10~40MB。
+	MaxBodyMB int `json:"max_body_mb"`
 	// CheckinWebhook 签到结果推送地址（企业微信/钉钉/飞书机器人）；空 = 不推送。
 	CheckinWebhook string `json:"checkin_webhook"`
 	// CheckinNotify 推送策略：fail（默认）/ always / never。
@@ -97,6 +100,7 @@ func Default() *Config {
 	c.Upstream.TimeoutSeconds = 120
 	c.LogRetentionDays = 90
 	c.CallRetentionMB = 1536
+	c.MaxBodyMB = 48
 	c.CheckinNotify = "fail"
 	return c
 }
@@ -213,6 +217,11 @@ func applyEnv(c *Config) {
 			c.CallRetentionMB = n
 		}
 	}
+	if v := os.Getenv("TW2A_MAX_BODY_MB"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			c.MaxBodyMB = n
+		}
+	}
 	if v := os.Getenv("TW2A_CHECKIN_WEBHOOK"); v != "" {
 		c.CheckinWebhook = v
 	}
@@ -256,6 +265,9 @@ func (c *Config) normalize() error {
 	}
 	if c.CallRetentionMB < 0 {
 		c.CallRetentionMB = 0
+	}
+	if c.MaxBodyMB <= 0 {
+		c.MaxBodyMB = 48
 	}
 	if c.DefaultModel == "" {
 		c.DefaultModel = "glm-5.2"

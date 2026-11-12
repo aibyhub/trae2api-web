@@ -25,7 +25,7 @@ type UsageEntry struct {
 	UID              string  `json:"uid"`
 	Model            string  `json:"model"`
 	Stream           bool    `json:"stream"`
-	Status           string  `json:"status"` // ok | error
+	Status           string  `json:"status"` // ok | error | canceled
 	Error            string  `json:"error,omitempty"`
 	PromptTokens     int64   `json:"prompt_tokens,omitempty"`
 	CompletionTokens int64   `json:"completion_tokens,omitempty"`
@@ -496,6 +496,8 @@ type usageErrStat struct {
 func classifyUsageErr(text string) string {
 	t := strings.ToLower(text)
 	switch {
+	case strings.Contains(t, "客户端断开"), strings.Contains(t, "canceled"):
+		return "canceled"
 	case strings.Contains(t, "全部账号不可用"), strings.Contains(t, "no_healthy"),
 		strings.Contains(t, "无可用账号"), strings.Contains(t, "轮换预算耗尽"), strings.Contains(t, "轮换"):
 		return "all_unavailable"

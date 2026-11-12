@@ -8,7 +8,9 @@ services:
     image: ghcr.io/aibyhub/trae2api-web:1.3.3
     container_name: trae2api-web
     restart: unless-stopped
-    mem_limit: 256m
+    # 48MB 请求体上限 + JSON 解析峰值内存 ≈ 2~3x 请求体大小；256m 曾在 8MB 时代
+    # 就触发过 OOM（dmesg: anon-rss 256440kB），统一升到 512m。
+    mem_limit: 512m
     init: true
     stop_grace_period: 30s
     networks:
