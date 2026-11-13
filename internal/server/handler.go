@@ -604,8 +604,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var peek struct {
-		Stream bool   `json:"stream"`
-		Model  string `json:"model"`
+		Stream   bool          `json:"stream"`
+		Model    string        `json:"model"`
+		User     string        `json:"user"`
+		Messages []peekMessage `json:"messages"`
 	}
 	_ = json.Unmarshal(body, &peek)
 
@@ -614,6 +616,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	// 会话粘性键：同一会话固定同一账号，上游提示词缓存才能跨轮命中。
+	// new-api 不透传 X-Token-Name，只能从请求内容派生（见 sticky.go）。
+	stickyKey := conversationKey(configName, peek.User, peek.Messages)
 	// 模型级挂死熔断（fast-fail）：该模型最近反复「出口故障/上游黑溺」时，
 	// 直接 503 让调用方秒切模型/渠道，不再陪上游黑洞干等 2~4 分钟 transport 超时。
 	if h.hangBlocked(configName) {
@@ -733,7 +738,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			log.Printf("chat rotation: budget exhausted (%.0fs), stop rotating", rotateBudget.Seconds())
 			break
 		}
-		acct := h.cfg.Pool.PickExcluding(tried)
+		acct := h.cfg.Pool.PickSticky(stickyKey, tried)
 		if acct == nil {
 			break
 		}
@@ -776,8 +781,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 出口/网络故障（代理不可达、连接被重置、畸形响应…）不是账号的问题：
 				// 不累计 errCount（否则出口抖一下就把好账号冷却甚至禁用），只把该出口临时隔离，
 				// 本次请求靠 tried 换号继续。
-				log.Printf("chat_stream uid=%s: 出口/网络故障（不计账号错误）: %v", acct.UID, shortErr(terr))
-				h.cfg.Pool.NoteTransportError(acct.UID, h.cfg.TransportCooldown, "出口/网络故障: "+shortErr(terr))
+				// 例外：等待响应头超时。它发生在上游已建连、正在预填大上下文时，
+				// 是「上游慢」而非「出口坏」；隔离出口会让超时风暴把全部账号摘掉，
+				// 直接变成 all accounts unavailable（2026-11-13 实证）。
+				if isHeaderTimeout(terr) {
+					log.Printf("chat_stream uid=%s: 首字节超时（上游预填慢，不隔离出口）: %v", acct.UID, shortErr(terr))
+				} else {
+					log.Printf("chat_stream uid=%s: 出口/网络故障（不计账号错误）: %v", acct.UID, shortErr(terr))
+					h.cfg.Pool.NoteTransportError(acct.UID, h.cfg.TransportCooldown, "出口/网络故障: "+shortErr(terr))
+				}
 				// 落一行使用记录：面板 errs 透视才看得到超时/出口风暴（2026-10-18 周日晚高峰实测缺口）。
 				record("error", "出口/网络故障: "+shortErr(terr))
 				// 模型级挂死观察窗：每请求记一笔（传输故障按请求去重，避免双账号
@@ -1071,6 +1083,16 @@ func writeOpenAIError(w http.ResponseWriter, status int, code, msg string) {
 // 连续隔离、甚至把模型熔断 5 分钟（2026-11-12 生产误熔断复盘）。
 func clientGone(r *http.Request) bool {
 	return r.Context().Err() != nil
+}
+
+// isHeaderTimeout 是否为「等待上游响应头超时」（Transport.ResponseHeaderTimeout）。
+// 这类错误说明连接已建立、上游正在预填；账号/出口本身没坏，不应做出口隔离。
+func isHeaderTimeout(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "awaiting headers") || strings.Contains(msg, "awaiting response headers")
 }
 
 // isStallErr 传输故障是否属于「挂死型」（等首字节超时、读写超时、上下文超时）。

@@ -35,6 +35,12 @@ func TestTransportErrorRecordsUsageRow(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
+	// 首字节超时是「上游预填慢」，不是出口坏：仍落账但不隔离账号
+	// （2026-11-13 复盘：超时风暴隔离全部出口 → all accounts unavailable）。
+	if st, ok := h.cfg.Pool.Status("u1"); !ok || st.TransportDown {
+		t.Fatalf("header timeout must not isolate the exit: %+v", st)
+	}
+
 	es := h.usage.Since(0)
 	if len(es) == 0 {
 		t.Fatal("transport fault left zero usage rows")

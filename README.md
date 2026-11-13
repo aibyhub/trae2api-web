@@ -122,6 +122,19 @@ go build -o trae2api-web ./cmd/server
 - 代理地址 scheme 的校验规则与传输层完全一致（`upstream.ValidProxyScheme`），不会出现「保存成功但实际静默直连」。
 - 全局兜底：环境变量 `TW2A_PROXY_URL`（账号未配 `proxyUrl` 时生效，优先级低于账号自身配置）。
 
+### 会话粘性与大上下文超时（v1.7.3 起）
+
+- **会话粘性选号**：同一会话（`model` + `user` + 首条非 system 消息指纹）在 30 分钟空闲窗口内
+  固定复用同一账号；账号冷却/禁用/出口隔离/本轮已重试时自动换号并更新绑定。目的：让上游
+  提示词缓存跨轮命中。2026-11-13 复盘：Trae 通道 65% 的连续调用在换号，`cache_read` 全为 0，
+  400K+ 上下文每轮全量预填，是 121s 首字节超时的主要来源（WB 粘性 91%，p90 仅 11-15s）。
+- **首字节超时默认 300s**：`TW2A_TIMEOUT_SECONDS` 现在对**直连和代理账号同时生效**
+  （此前代理路径重建 transport 时写死 120s，配置被静默忽略）。该值只限制「等响应头」，
+  不限制流式响应总时长。
+- **首字节超时不再隔离出口**：等待响应头超时说明连接已建立、上游正在预填，属于「上游慢」
+  而非「出口坏」；仍落错误账，但不把账号移出选号池，避免超时风暴导致全部账号不可用。
+  连接被拒、TLS 握手失败等真正的出口故障仍按 5 分钟隔离处理。
+
 ### 选号均衡与流式守护（v1.4.0 起）
 
 针对 2026-10 第 2 周生产问题做的三项加固：
@@ -258,7 +271,7 @@ curl -X POST http://127.0.0.1:7864/v1/chat/completions \
 | `TW2A_LOG_RETENTION_DAYS` | `90` | 日志保留天数（usage.jsonl / checkin.jsonl）；`0` = 关闭自动清理 |
 | `TW2A_CHECKIN_WEBHOOK` | (空) | 签到结果推送地址（企业微信/钉钉/飞书机器人）；空 = 不推送 |
 | `TW2A_CHECKIN_NOTIFY` | `fail` | 推送策略：`fail` / `always` / `never` |
-| `TW2A_TIMEOUT_SECONDS` | `120` | 上游请求超时时长（秒） |
+| `TW2A_TIMEOUT_SECONDS` | `300` | 上游等待响应头上限（秒），直连与代理账号同时生效；不限制流式响应总时长 |
 | `TW2A_ERR_THRESHOLD` | `3` | 触发冷却前的连续错误次数 |
 | `TW2A_ERR_COOLDOWN` | `300` | 错误冷却时长（秒） |
 | `TW2A_EXCHANGE_V3` | (空) | ExchangeToken v3 开关（`1`/`true` 开启）：走 `/trae/api/v3/oauth/ExchangeToken` + 设备证明（EC P-256 签名，密钥落盘 `data/device-key.json`）。旧端点当前仍工作，默认关；开启后如设备密钥缺失自动回退旧端点 |

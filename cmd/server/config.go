@@ -47,7 +47,9 @@ type Config struct {
 	} `json:"schedule"`
 
 	Upstream struct {
-		TimeoutSeconds int `json:"timeout_seconds"` // 120
+		// TimeoutSeconds 上游等待响应头的上限（秒）。2026-11-13 由 120 提到 300：
+		// 1M 上下文在 40% 左右时 Trae 预填经常 >120s，直接撞线导致 121s 失败。
+		TimeoutSeconds int `json:"timeout_seconds"` // 300
 		// StreamIdleTimeoutSeconds 上游 SSE 流「读空闲看门狗」：连续 N 秒读不到
 		// 任何新字节 → 主动断流按错误终态（2026-10-22：流内冻结实拍 44 分钟）。
 		// 0 = 默认 120；大 context 正常预填 ≤30s 出首事件，不误杀。
@@ -97,7 +99,7 @@ func Default() *Config {
 	// demote/replace 保留为可选模式（简单工具类调用方可用）。
 	c.Prompt.Mode = "auto"
 	c.SanitizeFingerprints = true
-	c.Upstream.TimeoutSeconds = 120
+	c.Upstream.TimeoutSeconds = 300
 	c.LogRetentionDays = 90
 	c.CallRetentionMB = 1536
 	c.MaxBodyMB = 48
@@ -255,7 +257,7 @@ func (c *Config) normalize() error {
 		c.Cooldown.ErrThresh = 3
 	}
 	if c.Upstream.TimeoutSeconds <= 0 {
-		c.Upstream.TimeoutSeconds = 120
+		c.Upstream.TimeoutSeconds = 300
 	}
 	if c.Upstream.StreamIdleTimeoutSeconds <= 0 {
 		c.Upstream.StreamIdleTimeoutSeconds = 120

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"testing"
+	"time"
 
 	"trae2api-web/internal/auth"
 )
@@ -89,6 +90,25 @@ func TestClientForProxy(t *testing.T) {
 	p3Std, _ := c.clientFor(a)
 	if p3Std == c.HTTP {
 		t.Fatal("socks5h must be accepted as a proxy, not silently fall back to direct")
+	}
+}
+
+// TestClientForProxyInheritsHeaderTimeout 代理客户端对必须继承 HeaderTimeout：
+// 历史 bug 是 clientFor 重建 transport 时写死 120s，导致 TW2A_TIMEOUT_SECONDS
+// 只对直连生效（2026-11-13 长上下文 121s 超时全部集中在代理账号）。
+func TestClientForProxyInheritsHeaderTimeout(t *testing.T) {
+	c := New()
+	c.HeaderTimeout = 300 * time.Second
+	a := &auth.Auth{AccessToken: "at", ProxyURL: "socks5://127.0.0.1:1080"}
+	std, stream := c.clientFor(a)
+	for name, cl := range map[string]*http.Client{"std": std, "stream": stream} {
+		tr, ok := cl.Transport.(*http.Transport)
+		if !ok {
+			t.Fatalf("%s transport = %T, want *http.Transport", name, cl.Transport)
+		}
+		if tr.ResponseHeaderTimeout != 300*time.Second {
+			t.Fatalf("%s ResponseHeaderTimeout=%v want 300s", name, tr.ResponseHeaderTimeout)
+		}
 	}
 }
 

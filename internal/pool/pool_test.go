@@ -376,3 +376,69 @@ func TestSetPacksAllStaleResetsExpire(t *testing.T) {
 		t.Fatalf("fresh pack expireAt=%d want %d", got, fresh)
 	}
 }
+
+func TestPickStickyReusesAccount(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.Add(&auth.Auth{UID: "u2"})
+	p.SetCredits("u1", 100)
+	p.SetCredits("u2", 50)
+	first := p.PickSticky("conv-1", nil)
+	if first == nil || first.UID != "u1" {
+		t.Fatalf("first pick=%+v want u1", first)
+	}
+	for i := 0; i < 3; i++ {
+		if got := p.PickSticky("conv-1", nil); got == nil || got.UID != "u1" {
+			t.Fatalf("sticky pick #%d=%+v want u1", i, got)
+		}
+	}
+}
+
+func TestPickStickyFailsOverWhenCooling(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.Add(&auth.Auth{UID: "u2"})
+	p.SetCredits("u1", 100)
+	p.SetCredits("u2", 50)
+	first := p.PickSticky("conv-1", nil)
+	if first == nil || first.UID != "u1" {
+		t.Fatalf("first pick=%+v want u1", first)
+	}
+	p.Cooldown("u1", CoolSoft, time.Hour, "429")
+	second := p.PickSticky("conv-1", nil)
+	if second == nil || second.UID != "u2" {
+		t.Fatalf("after cooldown pick=%+v want u2", second)
+	}
+	// 冷却解除后仍粘在新账号上，避免来回跳号把缓存打散。
+	if got := p.PickSticky("conv-1", nil); got == nil || got.UID != "u2" {
+		t.Fatalf("sticky should stay on u2, got %+v", got)
+	}
+}
+
+func TestPickStickyRespectsTried(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.Add(&auth.Auth{UID: "u2"})
+	p.SetCredits("u1", 100)
+	p.SetCredits("u2", 50)
+	first := p.PickSticky("conv-1", nil)
+	if first == nil || first.UID != "u1" {
+		t.Fatalf("first pick=%+v want u1", first)
+	}
+	got := p.PickSticky("conv-1", map[string]bool{first.UID: true})
+	if got == nil || got.UID != "u2" {
+		t.Fatalf("tried pick=%+v want u2", got)
+	}
+}
+
+func TestPickStickyEmptyKeyFallsBack(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.SetCredits("u1", 100)
+	if got := p.PickSticky("", nil); got == nil || got.UID != "u1" {
+		t.Fatalf("empty key pick=%+v want u1", got)
+	}
+	if len(p.sticky) != 0 {
+		t.Fatalf("empty key must not create sticky entries, got %d", len(p.sticky))
+	}
+}

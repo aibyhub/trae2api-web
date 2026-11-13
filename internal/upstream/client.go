@@ -110,6 +110,9 @@ type Client struct {
 	// 通过 Transport.ResponseHeaderTimeout 兜底「上游一直不返回首字节」的悬挂。
 	// 与 HTTP 共享同一 Transport（连接池复用）。nil 时 ChatStream 回退 HTTP。
 	StreamHTTP *http.Client
+	// HeaderTimeout 上游等待响应头的上限；代理客户端对（clientFor）也用它。
+	// 0 = 120s（兼容旧行为）。主程序按 upstream.timeout_seconds 覆盖。
+	HeaderTimeout time.Duration
 
 	AgentHost string // https://trae-api-cn.mchost.guru
 	UgHost    string // https://api.trae.cn
@@ -150,12 +153,16 @@ func tlsFPEnabled() bool {
 // 隧道由 tlsfp 拨号器内部建立，指纹握手发生在隧道出口端；UConn 非 *tls.Conn，
 // TLSNextProto 仍置空以显式约定 HTTP/1.1。
 // 关闭（回退模式）：直连保持历史行为（自动 h2）；代理保持 v1.2.8 强制 h1.1。
-func newUpstreamTransport(proxyURL *url.URL) *http.Transport {
+// headerTimeout 是等待上游响应头的上限（0 = 120s）；长上下文预填必须给足时间。
+func newUpstreamTransport(proxyURL *url.URL, headerTimeout time.Duration) *http.Transport {
+	if headerTimeout <= 0 {
+		headerTimeout = 120 * time.Second
+	}
 	tr := &http.Transport{
 		MaxIdleConns:          100,
 		MaxIdleConnsPerHost:   20,
 		IdleConnTimeout:       90 * time.Second,
-		ResponseHeaderTimeout: 120 * time.Second, // 首字节兜底（长推理预留），不限制整流时长
+		ResponseHeaderTimeout: headerTimeout, // 首字节兜底（长上下文预填预留），不限制整流时长
 	}
 	if tlsFPEnabled() {
 		dial, err := tlsfp.NewDialTLSContext(nil, proxyURL)
@@ -196,14 +203,15 @@ func newUpstreamTransport(proxyURL *url.URL) *http.Transport {
 
 // New 生产默认值。配置连接池减少 TLS 握手。
 func New() *Client {
-	tr := newUpstreamTransport(nil)
+	tr := newUpstreamTransport(nil, 120*time.Second)
 	return &Client{
-		HTTP:       &http.Client{Timeout: 120 * time.Second, Transport: tr},
-		StreamHTTP: &http.Client{Transport: tr}, // 无总超时
-		AgentHost:  AgentHost,
-		UgHost:     UgHost,
-		OAuthHost:  OAuthHost,
-		ClientID:   ClientID,
+		HTTP:          &http.Client{Timeout: 120 * time.Second, Transport: tr},
+		StreamHTTP:    &http.Client{Transport: tr}, // 无总超时
+		HeaderTimeout: 120 * time.Second,
+		AgentHost:     AgentHost,
+		UgHost:        UgHost,
+		OAuthHost:     OAuthHost,
+		ClientID:      ClientID,
 	}
 }
 
@@ -266,7 +274,10 @@ func (c *Client) clientFor(a *auth.Auth) (std, stream *http.Client) {
 	}
 	// 统一走 newUpstreamTransport：tlsfp 开启时由指纹拨号器建隧道（Proxy 置 nil），
 	// 关闭时等价于旧 Clone+Proxy 路径（v1.2.8 强制 h1.1）。
-	tr := newUpstreamTransport(u)
+	// 关键：代理路径也必须继承 HeaderTimeout——历史上这里重新构造 transport 时
+	// 写死 120s，导致 TW2A_TIMEOUT_SECONDS 只对直连生效（2026-11-13 长上下文
+	// 121s 超时全部发生在代理账号上）。
+	tr := newUpstreamTransport(u, c.HeaderTimeout)
 	p := &proxyPair{
 		std:    &http.Client{Timeout: c.HTTP.Timeout, Transport: tr},
 		stream: &http.Client{Transport: tr}, // 无总超时（SSE）

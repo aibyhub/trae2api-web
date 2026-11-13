@@ -139,11 +139,27 @@ type Pool struct {
 	byUID    map[string]*entry
 	stateFp  string
 	creditFp string // credits.jsonl（积分余额轨迹）；空 = 不记录
+	// sticky 会话粘性：会话指纹 → 账号，TTL 内优先复用，让上游提示词缓存命中。
+	// 纯内存态（进程重启重建）：宁可丢失缓存收益，也不把会话状态写进存档。
+	sticky map[string]stickyEntry
+}
+
+const (
+	// stickyTTL 粘性绑定的空闲有效期：每次命中都会续期；会话闲置超过该时长后
+	// 自然解绑，避免无限增长和「旧会话永远锁死一个账号」。
+	stickyTTL = 30 * time.Minute
+	// stickyGCFloor 触发过期清理的条目下限，避免每个请求都全表扫描。
+	stickyGCFloor = 1024
+)
+
+type stickyEntry struct {
+	uid   string
+	until time.Time
 }
 
 // New 构建池；stateFp 非空时尝试加载旧状态，并把积分轨迹定在 stateFp 同目录（data/credits.jsonl）。
 func New(stateFp string) *Pool {
-	p := &Pool{byUID: map[string]*entry{}, stateFp: stateFp}
+	p := &Pool{byUID: map[string]*entry{}, stateFp: stateFp, sticky: map[string]stickyEntry{}}
 	if stateFp != "" {
 		p.load()
 		if dir := filepath.Dir(stateFp); dir != "" {
@@ -180,6 +196,7 @@ func (p *Pool) SyncToDir(auths []*auth.Auth) {
 	for uid := range p.byUID {
 		if !seen[uid] {
 			delete(p.byUID, uid)
+			p.dropStickyForLocked(uid)
 		}
 	}
 }
@@ -193,6 +210,7 @@ func (p *Pool) Remove(uid string) bool {
 		return false
 	}
 	delete(p.byUID, uid)
+	p.dropStickyForLocked(uid)
 	p.saveLocked()
 	return true
 }
@@ -231,7 +249,39 @@ func (p *Pool) Pick() *auth.Auth {
 func (p *Pool) PickExcluding(tried map[string]bool) *auth.Auth {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
+	return p.pickLocked(tried, time.Now())
+}
+
+// PickSticky 在 PickExcluding 的基础上增加会话粘性：同一会话（key 非空）在
+// TTL 内优先复用上次成功的账号，避免每轮换号导致上游提示词缓存全部失效
+// （Trae 的上下文缓存按账号隔离，换号 = 全量预填，120s 首字节超时的直接诱因）。
+// 绑定账号冷却/禁用/出口隔离/本轮已试时，按常规规则重新选号并覆盖绑定。
+// key 为空时退化为 PickExcluding（兼容无会话指纹的调用）。
+func (p *Pool) PickSticky(key string, tried map[string]bool) *auth.Auth {
 	now := time.Now()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if key != "" {
+		if se, ok := p.sticky[key]; ok && now.Before(se.until) {
+			if e, ok := p.byUID[se.uid]; ok && (tried == nil || !tried[se.uid]) && e.healthy(now) {
+				p.sticky[key] = stickyEntry{uid: se.uid, until: now.Add(stickyTTL)}
+				return e.a
+			}
+		}
+	}
+	best := p.pickLocked(tried, now)
+	if best == nil {
+		return nil
+	}
+	if key != "" {
+		p.sticky[key] = stickyEntry{uid: best.UID, until: now.Add(stickyTTL)}
+		p.gcStickyLocked(now)
+	}
+	return best
+}
+
+// pickLocked 选号核心（调用方持锁）。
+func (p *Pool) pickLocked(tried map[string]bool, now time.Time) *auth.Auth {
 	var best *entry
 	for uid, e := range p.byUID {
 		if tried != nil && tried[uid] {
@@ -248,6 +298,27 @@ func (p *Pool) PickExcluding(tried map[string]bool) *auth.Auth {
 		return nil
 	}
 	return best.a
+}
+
+// dropStickyForLocked 清除指向某账号的全部会话绑定（账号被删除时调用，需持锁）。
+func (p *Pool) dropStickyForLocked(uid string) {
+	for k, se := range p.sticky {
+		if se.uid == uid {
+			delete(p.sticky, k)
+		}
+	}
+}
+
+// gcStickyLocked 条目过多时清理已过期绑定（需持锁）。
+func (p *Pool) gcStickyLocked(now time.Time) {
+	if len(p.sticky) < stickyGCFloor {
+		return
+	}
+	for k, se := range p.sticky {
+		if !now.Before(se.until) {
+			delete(p.sticky, k)
+		}
+	}
 }
 
 // expireFirst 报告 a 是否应排在 b 之前（先用掉快过期的额度，同时把流量摊开）。

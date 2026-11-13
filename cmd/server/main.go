@@ -61,6 +61,9 @@ func main() {
 	up := upstream.New()
 	up.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	// 流式客户端无总超时，仅用首字节兜底（时长由 SSE 流本身决定）。
+	// HeaderTimeout 同步给 clientFor：账号带代理时走的是动态创建的 transport，
+	// 不设它会让代理出口永远停在 120s（2026-11-13 修复）。
+	up.HeaderTimeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	if tr, ok := up.StreamHTTP.Transport.(*http.Transport); ok {
 		tr.ResponseHeaderTimeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	}
